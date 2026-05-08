@@ -1,5 +1,68 @@
 module GalileoMSC
 
-greet() = print("Hello World!")
+using Accessors
+using Distributions
+using Gen
+using LinearAlgebra
+using PhyBullet
+using PhySMC
+using Plots
+using PyCall
+using Random
+using Statistics
 
-end # module GalileoMSC
+include("common.jl")
+include("scenes.jl")
+include("particle_filter_model.jl")
+include("drift_model.jl")
+include("plotting.jl")
+include("visualization.jl")
+
+export
+    # common helpers
+    observe,
+    update_latents,
+    sample_object,
+    prior,
+    make_observations,
+    observations_from_trace,
+    detect_collision_time,
+    gamma_from_mean_std,
+    trunc_norm,
+    # scenes
+    ramp,
+    create_ramp_simulation,
+    sample_random_scene,
+    simulate_scene_positions,
+    # particle-filter model
+    particle_filter_model,
+    model,
+    particle_filter_proposal,
+    proposal,
+    inference_procedure,
+    inference_with_history,
+    run_smoke_test,
+    run_history_smoke_test,
+    particle_filter_timing_spec,
+    # drift model
+    drift_model,
+    drift_proposal,
+    drift_inference_procedure,
+    drift_inference_with_history,
+    run_drift_smoke_test,
+    drift_timing_spec,
+    # plotting
+    make_pf_timing_spec,
+    sample_shared_scene_bank,
+    benchmark_step_runtime,
+    plot_step_runtime_comparison,
+    run_mass_ratio_history_comparison,
+    plot_mass_ratio_history,
+    plot_mass_ratio_history_comparison,
+    timing_spec,
+    # visualization
+    scene_metadata,
+    visualize_scene,
+    plot_scene_trajectory
+
+end
