@@ -1,0 +1,14 @@
+name = "GalileoMSC"
+uuid = "378d72aa-70ad-4a59-9476-5360dad99570"
+version = "0.1.0"
+authors = ["aa2842 "]
+
+[deps]
+Gen = "ea4f424c-a589-11e8-07c0-fd5c91b9da4a"
+Pluto = "c3e4b0f8-55cb-11ea-2926-15256bba5781"
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
+
+[compat]
+Gen = "0.4.8"
+Pluto = "0.20.24"
+Revise = "3.14.2"

@@ -1,0 +1,19 @@
+# Jupyter notebooks
+**/.ipynb_checkpoints/
+
+# Logs
+logs/
+**/logs/
+*.log
+
+# Julia local build/test artifacts
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+deps/deps.jl
+docs/build/
+
+# Local editor and OS files
+.DS_Store
+.vscode/
+.idea/
