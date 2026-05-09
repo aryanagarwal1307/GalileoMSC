@@ -9,9 +9,9 @@ begin
     import Pkg
     Pkg.activate(joinpath(@__DIR__, ".."))
 
-    include(joinpath(@__DIR__, "..", "src", "GalileoMSC.jl"))
-    using .GalileoMSC
-    using Plots
+    #include(joinpath(@__DIR__, "..", "src", "GalileoMSC.jl"))
+    using GalileoMSC
+    #using Plots
 end
 
 # ╔═╡ c0d50c0e-578f-48c6-a145-59ab2699dc0d
