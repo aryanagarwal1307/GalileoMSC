@@ -11,13 +11,13 @@ begin
 
     #include(joinpath(@__DIR__, "..", "src", "GalileoMSC.jl"))
     using GalileoMSC
-    #using Plots
+    using Plots
 end
 
 # ╔═╡ c0d50c0e-578f-48c6-a145-59ab2699dc0d
 begin
     selected_models = [:particle_filter, :drift]
-    T = 40
+    T = 80
     particles = 20
     rejuv_moves = 1
     drift_std = 0.25
