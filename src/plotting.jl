@@ -29,7 +29,7 @@ function make_pf_timing_spec(; label,
     )
 end
 
-function _model_config(model_key::Symbol; drift_std::Float64=0.25)
+function _model_config(model_key::Symbol; drift_std::Float64=0.25, msc_params::MSCParams=DEFAULT_MSC_PARAMS)
     if model_key in (:particle_filter, :particlefilter, :pf, :static)
         return (
             key = :particle_filter,
@@ -48,43 +48,52 @@ function _model_config(model_key::Symbol; drift_std::Float64=0.25)
             history_runner = drift_inference_with_history,
             timing_spec = drift_timing_spec(label="drift model", drift_std=drift_std)
         )
+    elseif model_key in (:msc, :msc_model, :collision_msc)
+        return (
+            key = :msc,
+            label = "MSC v0",
+            pf_model = msc_model,
+            gm_args_builder = (T, sim, template) -> (T, sim, template, msc_params),
+            history_runner = msc_inference_with_history,
+            timing_spec = msc_timing_spec(label="MSC v0", params=msc_params)
+        )
     else
-        error("Unknown model key: $model_key. Use :particle_filter or :drift.")
+        error("Unknown model key: $model_key. Use :particle_filter, :drift, or :msc.")
     end
 end
 
-_model_config(model_key::AbstractString; drift_std::Float64=0.25) =
-    _model_config(Symbol(model_key); drift_std=drift_std)
+_model_config(model_key::AbstractString; drift_std::Float64=0.25, msc_params::MSCParams=DEFAULT_MSC_PARAMS) =
+    _model_config(Symbol(model_key); drift_std=drift_std, msc_params=msc_params)
 
-function _model_config(config::NamedTuple; drift_std::Float64=0.25)
+function _model_config(config::NamedTuple; drift_std::Float64=0.25, msc_params::MSCParams=DEFAULT_MSC_PARAMS)
     required = (:key, :label, :pf_model, :gm_args_builder, :history_runner, :timing_spec)
     all(key -> haskey(config, key), required) ||
         error("Custom model configs must include: $(join(string.(required), ", ")).")
     return config
 end
 
-function _resolve_model_configs(models; drift_std::Float64=0.25)
+function _resolve_model_configs(models; drift_std::Float64=0.25, msc_params::MSCParams=DEFAULT_MSC_PARAMS)
     items = models isa AbstractVector ? models : [models]
-    return [_model_config(item; drift_std=drift_std) for item in items]
+    return [_model_config(item; drift_std=drift_std, msc_params=msc_params) for item in items]
 end
 
-function timing_spec(model_key; drift_std::Float64=0.25)
+function timing_spec(model_key; drift_std::Float64=0.25, msc_params::MSCParams=DEFAULT_MSC_PARAMS)
     if model_key isa NamedTuple && haskey(model_key, :pf_model)
         return model_key
     end
-    return _model_config(model_key; drift_std=drift_std).timing_spec
+    return _model_config(model_key; drift_std=drift_std, msc_params=msc_params).timing_spec
 end
 
-function _resolve_timing_specs(model_specs; drift_std::Float64=0.25)
+function _resolve_timing_specs(model_specs; drift_std::Float64=0.25, msc_params::MSCParams=DEFAULT_MSC_PARAMS)
     items = model_specs isa AbstractVector ? model_specs : [model_specs]
-    return [timing_spec(item; drift_std=drift_std) for item in items]
+    return [timing_spec(item; drift_std=drift_std, msc_params=msc_params) for item in items]
 end
 
-function _scene_source_from_arg(scene_model, scene_args_builder, specs, drift_std::Float64)
+function _scene_source_from_arg(scene_model, scene_args_builder, specs, drift_std::Float64, msc_params::MSCParams)
     if scene_model === nothing
         return (specs[1].pf_model, specs[1].gm_args_builder)
     elseif scene_model isa Symbol || scene_model isa AbstractString
-        spec = timing_spec(scene_model; drift_std=drift_std)
+        spec = timing_spec(scene_model; drift_std=drift_std, msc_params=msc_params)
         return (spec.pf_model, spec.gm_args_builder)
     else
         isnothing(scene_args_builder) &&
@@ -218,11 +227,12 @@ function plot_step_runtime_comparison(model_specs;
                                       particles::Int=30,
                                       rejuv_moves::Int=2,
                                       drift_std::Float64=0.25,
+                                      msc_params::MSCParams=DEFAULT_MSC_PARAMS,
                                       seed::Int=1,
                                       warmup::Bool=true,
                                       summary::Symbol=:mean)
-    specs = _resolve_timing_specs(model_specs; drift_std=drift_std)
-    source_model, source_args_builder = _scene_source_from_arg(scene_model, scene_args_builder, specs, drift_std)
+    specs = _resolve_timing_specs(model_specs; drift_std=drift_std, msc_params=msc_params)
+    source_model, source_args_builder = _scene_source_from_arg(scene_model, scene_args_builder, specs, drift_std, msc_params)
 
     scene_bank = isnothing(scenes) ? sample_shared_scene_bank(T, sim, template;
                                                               n_scenes=n_scenes,
@@ -282,14 +292,15 @@ function run_mass_ratio_history_comparison(models;
                                            particles::Int=30,
                                            rejuv_moves::Int=2,
                                            drift_std::Float64=0.25,
+                                           msc_params::MSCParams=DEFAULT_MSC_PARAMS,
                                            seed::Int=1)
-    configs = _resolve_model_configs(models; drift_std=drift_std)
+    configs = _resolve_model_configs(models; drift_std=drift_std, msc_params=msc_params)
 
     true_trace = nothing
     if obs === nothing
         if observed_positions === nothing
             Random.seed!(seed)
-            source_model, source_builder = _scene_source_from_arg(scene_model, scene_args_builder, [configs[1].timing_spec], drift_std)
+            source_model, source_builder = _scene_source_from_arg(scene_model, scene_args_builder, [configs[1].timing_spec], drift_std, msc_params)
             true_trace, = Gen.generate(source_model, source_builder(T, sim, template))
             observed_positions = observations_from_trace(true_trace)
         end
@@ -341,6 +352,10 @@ end
 
 function _history_collision_time(item)
     hasproperty(item, :collision_time) ? getproperty(item, :collision_time) : nothing
+end
+
+function _is_history_vector(x)
+    return x isa AbstractVector && !isempty(x) && hasproperty(x[1], :t)
 end
 
 function plot_mass_ratio_history(history; collision_time=nothing, use_quantiles=true, label="posterior mean")
@@ -415,6 +430,66 @@ function plot_mass_ratio_history_comparison(history_results;
 
     for (idx, ct) in enumerate(collision_times)
         Plots.vline!(p, [ct], label=idx == 1 ? "collision time" : "", lw=2, ls=:dash)
+    end
+
+    return p
+end
+
+function plot_capsule_activation_history(history_results;
+                                         collision_time=nothing,
+                                         show_switch::Bool=true,
+                                         title::AbstractString="MSC capsule activation over time")
+    items = if hasproperty(history_results, :results)
+        history_results.results
+    elseif _is_history_vector(history_results)
+        [(label = "MSC v0", history = history_results, collision_time = collision_time)]
+    else
+        history_results
+    end
+    items = items isa AbstractVector ? items : [items]
+
+    p = Plots.plot(xlabel="time",
+                   ylabel="probability",
+                   title=title,
+                   legend=:topright,
+                   ylims=(0, 1))
+
+    plotted_any = false
+
+    for (idx, item) in enumerate(items)
+        history = _history_value(item)
+        isempty(history) && continue
+        hasproperty(history[1], :capsule_active_prob) || continue
+
+        label = _history_label(item, idx)
+        ts = [h.t for h in history]
+        active_probs = [h.capsule_active_prob for h in history]
+        Plots.plot!(p, ts, active_probs;
+                    label="$(label) active",
+                    lw=3,
+                    marker=:circle,
+                    ms=3)
+        plotted_any = true
+
+        if show_switch && hasproperty(history[1], :capsule_switch_prob)
+            switch_probs = [h.capsule_switch_prob for h in history]
+            Plots.plot!(p, ts, switch_probs;
+                        label="$(label) switch",
+                        lw=2,
+                        ls=:dash)
+        end
+    end
+
+    plotted_any || error("No history entries with capsule_active_prob were found.")
+
+    collision_times = if collision_time !== nothing
+        [collision_time]
+    else
+        unique([_history_collision_time(item) for item in items if _history_collision_time(item) !== nothing])
+    end
+
+    for (idx, ct) in enumerate(collision_times)
+        Plots.vline!(p, [ct], label=idx == 1 ? "collision time" : "", lw=2, ls=:dot)
     end
 
     return p

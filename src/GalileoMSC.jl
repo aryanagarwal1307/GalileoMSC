@@ -15,6 +15,7 @@ include("common.jl")
 include("scenes.jl")
 include("particle_filter_model.jl")
 include("drift_model.jl")
+include("msc_model.jl")
 include("plotting.jl")
 include("visualization.jl")
 
@@ -51,6 +52,24 @@ export
     drift_inference_with_history,
     run_drift_smoke_test,
     drift_timing_spec,
+    # MSC v0 model
+    MSCParams,
+    CollisionMSC,
+    MSCState,
+    MSCEventStats,
+    DEFAULT_MSC_PARAMS,
+    default_msc_capsule,
+    initial_msc_state,
+    collision_birth_probability,
+    collision_survival_probability,
+    collision_capsule_step,
+    msc_model,
+    msc_proposal,
+    msc_inference_procedure,
+    msc_inference_with_history,
+    summarize_msc_capsules,
+    run_msc_smoke_test,
+    msc_timing_spec,
     # plotting
     make_pf_timing_spec,
     sample_shared_scene_bank,
@@ -59,6 +78,7 @@ export
     run_mass_ratio_history_comparison,
     plot_mass_ratio_history,
     plot_mass_ratio_history_comparison,
+    plot_capsule_activation_history,
     timing_spec,
     # visualization
     scene_metadata,
