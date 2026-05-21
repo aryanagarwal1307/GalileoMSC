@@ -15,13 +15,25 @@ function update_latents(ls::RigidBodyLatents, mass::Float64)
     RigidBodyLatents(setproperties(ls.data; mass=mass))
 end
 
+const LOG_MASS_LOW = -3.0
+const LOG_MASS_HIGH = 3.0
+
+function mass_to_log_mass(mass::Real)
+    mass > 0 || error("mass ratio must be positive")
+    return log(Float64(mass))
+end
+
+function log_mass_to_mass(log_mass::Real)
+    return exp(Float64(log_mass))
+end
+
 ################################################################################
 # Initial prior
 ################################################################################
 
 @gen function sample_object(ls::RigidBodyLatents)
-    mass ~ gamma(1.2, 10.0)
-    return update_latents(ls, mass)
+    log_mass ~ uniform(LOG_MASS_LOW, LOG_MASS_HIGH)
+    return update_latents(ls, log_mass_to_mass(log_mass))
 end
 
 @gen function prior(old_latents::Vector{BulletElemLatents})
@@ -67,6 +79,16 @@ function make_observations(observed_positions)
     end
 
     return obs
+end
+
+function template_mass_ratio(template::BulletState)
+    return Float64(template.latents[1].data.mass)
+end
+
+function mass_constraint(mass::Real)
+    constraints = Gen.choicemap()
+    constraints[:latents => :obj1 => :log_mass] = mass_to_log_mass(mass)
+    return constraints
 end
 
 function observations_from_trace(tr::Gen.Trace)

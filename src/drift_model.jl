@@ -3,12 +3,12 @@
 ################################################################################
 
 """
-Drift the unknown object's mass around its previous value.
+Drift the unknown object's mass ratio in log space.
 """
 @gen function drift_object(ls::RigidBodyLatents, drift_std::Float64)
-    prev_mass = ls.data.mass
-    mass ~ trunc_norm(prev_mass, drift_std, 0.0, Inf) #TODO give an upper bound
-    return update_latents(ls, mass)
+    prev_log_mass = mass_to_log_mass(ls.data.mass)
+    log_mass_delta ~ normal(0.0, drift_std)
+    return update_latents(ls, log_mass_to_mass(prev_log_mass + log_mass_delta))
 end
 
 """
@@ -49,21 +49,22 @@ end
 ################################################################################
 
 """
-MH proposal for the drifted mass at a specific time t.
+MH proposal for the log-mass drift at a specific time t.
 Address path is:
-:states => t => :drift => :obj1 => :mass
+:states => t => :drift => :obj1 => :log_mass_delta
 """
-@gen function drift_proposal(tr::Gen.Trace, t::Int)
+@gen function drift_proposal(tr::Gen.Trace, t::Int, proposal_drift_std::Float64)
     choices = get_choices(tr)
-    prev_mass = choices[:states => t => :drift => :obj1 => :mass]
-    mass = {:states => t => :drift => :obj1 => :mass} ~ trunc_norm(prev_mass, 0.25, 0.0, Inf) # TODO upper bound (same as above)
-    return mass
+    prev_log_mass_delta = choices[:states => t => :drift => :obj1 => :log_mass_delta]
+    log_mass_delta = {:states => t => :drift => :obj1 => :log_mass_delta} ~ normal(prev_log_mass_delta, proposal_drift_std)
+    return log_mass_delta
 end
 
 function drift_inference_procedure(gm_args::Tuple,
                                    obs::Vector{Gen.ChoiceMap},
                                    particles::Int=20,
-                                   rejuv_moves::Int=1)
+                                   rejuv_moves::Int=1;
+                                   proposal_drift_std::Float64=0.25)
 
     # gm_args = (T, sim, template, drift_std)
     get_args(t) = (t, gm_args[2:4]...)
@@ -76,8 +77,7 @@ function drift_inference_procedure(gm_args::Tuple,
         Gen.maybe_resample!(state, ess_threshold=particles / 2)
 
         for i in 1:particles, s in 1:rejuv_moves
-            # state.traces[i], _ = Gen.mh(state.traces[i], drift_proposal, (t,)) # use selection instead of a proposal function;
-            state.traces[i], _ = Gen.mh(state.traces[i], Gen.select(:states => t => :drift => :obj1 => :mass)) # use selection instead of a proposal function;
+            state.traces[i], _ = Gen.mh(state.traces[i], drift_proposal, (t, proposal_drift_std))
         end
     end
 
@@ -89,7 +89,7 @@ end
 ################################################################################
 
 function extract_current_drift_mass(tr::Gen.Trace, t::Int)
-    get_choices(tr)[:states => t => :drift => :obj1 => :mass]
+    return Float64(get_retval(tr)[t].latents[1].data.mass)
 end
 
 function summarize_drift_masses(traces, t::Int)
@@ -108,7 +108,8 @@ end
 function drift_inference_with_history(gm_args::Tuple,
                                       obs::Vector{Gen.ChoiceMap},
                                       particles::Int=20,
-                                      rejuv_moves::Int=1)
+                                      rejuv_moves::Int=1;
+                                      proposal_drift_std::Float64=0.25)
 
     get_args(t) = (t, gm_args[2:4]...)
 
@@ -122,7 +123,7 @@ function drift_inference_with_history(gm_args::Tuple,
         Gen.maybe_resample!(state, ess_threshold=particles / 2)
 
         for i in 1:particles, s in 1:rejuv_moves
-            state.traces[i], _ = Gen.mh(state.traces[i], drift_proposal, (t,))
+            state.traces[i], _ = Gen.mh(state.traces[i], drift_proposal, (t, proposal_drift_std))
         end
 
         current_traces = Gen.sample_unweighted_traces(state, particles)
@@ -147,16 +148,23 @@ end
 # Synthetic smoke test for drift model
 ################################################################################
 
-function run_drift_smoke_test(T::Int, sim, template, drift_std::Float64; particles=30, rejuv_moves=2)
-    true_trace, = Gen.generate(drift_model, (T, sim, template, drift_std))
+function run_drift_smoke_test(T::Int, sim, template, drift_std::Float64;
+                              particles=30,
+                              rejuv_moves=2,
+                              ground_truth_mass=nothing,
+                              proposal_drift_std::Float64=0.25)
+    true_mass = ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
+    true_trace, = Gen.generate(drift_model, (T, sim, template, drift_std), mass_constraint(true_mass))
     observed_positions = observations_from_trace(true_trace)
     obs = make_observations(observed_positions)
 
-    history = drift_inference_with_history((T, sim, template, drift_std), obs, particles, rejuv_moves)
+    history = drift_inference_with_history((T, sim, template, drift_std), obs, particles, rejuv_moves;
+                                           proposal_drift_std=proposal_drift_std)
     collision_time = detect_collision_time(observed_positions)
 
     return (
         true_trace = true_trace,
+        ground_truth_mass = true_mass,
         observed_positions = observed_positions,
         obs = obs,
         history = history,
@@ -164,7 +172,9 @@ function run_drift_smoke_test(T::Int, sim, template, drift_std::Float64; particl
     )
 end
 
-function drift_timing_spec(; label="drift model", drift_std::Float64=0.25)
+function drift_timing_spec(; label="drift model",
+                           drift_std::Float64=0.25,
+                           proposal_drift_std::Float64=0.25)
     return make_pf_timing_spec(
         label = label,
         pf_model = drift_model,
@@ -175,7 +185,8 @@ function drift_timing_spec(; label="drift model", drift_std::Float64=0.25)
             for i in 1:particles, s in 1:rejuv_moves
                 state.traces[i], _ = Gen.mh(
                     state.traces[i],
-                    Gen.select(:states => t => :drift => :obj1 => :mass)
+                    drift_proposal,
+                    (t, proposal_drift_std)
                 )
             end
             return nothing

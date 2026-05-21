@@ -3,18 +3,18 @@
 ################################################################################
 
 Base.@kwdef struct MSCParams
-    birth_base::Float64 = 0.005
-    birth_max::Float64 = 0.65
-    birth_distance_scale::Float64 = 0.55
-    approach_speed_scale::Float64 = 0.25
-    cooldown_steps::Int = 2
-    cooldown_birth_scale::Float64 = 0.2
-    survival_base::Float64 = 0.2
-    survival_near_boost::Float64 = 0.75
-    survival_distance_scale::Float64 = 0.45
-    min_active_steps::Int = 3
-    min_age_survival::Float64 = 0.95
-    age_decay_steps::Float64 = 8.0
+    birth_base::Float64 = 0.005                 # starting prob for capsule birth
+    birth_max::Float64 = 0.65                   # maximum prob to add to base if objects will collide
+    birth_distance_scale::Float64 = 0.55        # controls how capsule prob scaled with object distance
+    approach_speed_scale::Float64 = 0.25        # controls how capsule prob scales if objects are approaching each other
+    cooldown_steps::Int = 2                     # "death" cooldown
+    cooldown_birth_scale::Float64 = 0.2         # scales (reduces) prob of rebirth after death
+    survival_base::Float64 = 0.2                # baseline prob a capsule survives
+    survival_near_boost::Float64 = 0.75         # boost survival prob is objects are close by
+    survival_distance_scale::Float64 = 0.45     # scale for near collision
+    min_active_steps::Int = 3                   # minimum steps for capsule to be active
+    min_age_survival::Float64 = 0.95            # min survival prob early on
+    age_decay_steps::Float64 = 8.0              # gradual decay of survival
 end
 
 """
@@ -152,9 +152,9 @@ end
 
 @gen function msc_proposal(tr::Gen.Trace)
     choices = get_choices(tr)
-    prev_mass = choices[:latents => :obj1 => :mass]
-    mass = {:latents => :obj1 => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
-    return mass
+    prev_log_mass = choices[:latents => :obj1 => :log_mass]
+    log_mass = {:latents => :obj1 => :log_mass} ~ normal(prev_log_mass, 1.0)
+    return log_mass
 end
 
 ################################################################################
@@ -262,8 +262,12 @@ end
 # Synthetic smoke test and timing spec
 ################################################################################
 
-function run_msc_smoke_test(T::Int, sim, template, params::MSCParams=DEFAULT_MSC_PARAMS; particles=30, rejuv_moves=2)
-    true_trace, = Gen.generate(msc_model, (T, sim, template, params))
+function run_msc_smoke_test(T::Int, sim, template, params::MSCParams=DEFAULT_MSC_PARAMS;
+                            particles=30,
+                            rejuv_moves=2,
+                            ground_truth_mass=nothing)
+    true_mass = ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
+    true_trace, = Gen.generate(msc_model, (T, sim, template, params), mass_constraint(true_mass))
     observed_positions = observations_from_trace(true_trace)
     obs = make_observations(observed_positions)
 
@@ -272,6 +276,7 @@ function run_msc_smoke_test(T::Int, sim, template, params::MSCParams=DEFAULT_MSC
 
     return (
         true_trace = true_trace,
+        ground_truth_mass = true_mass,
         observed_positions = observed_positions,
         obs = obs,
         history = history,

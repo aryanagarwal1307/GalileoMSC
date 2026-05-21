@@ -29,19 +29,17 @@ const model = particle_filter_model
 ################################################################################
 
 """
-This proposal function implements a random walk for the ramp object's mass.
-
-The proposal is truncated so the sampled mass stays physically valid.
+This proposal function implements a random walk for the ramp object's log mass.
 """
 @gen function particle_filter_proposal(tr::Gen.Trace)
     choices = get_choices(tr)
 
-    # Only obj1 mass is random in the prior
-    prev_mass = choices[:latents => :obj1 => :mass]
+    # Only obj1 log mass is random in the prior.
+    prev_log_mass = choices[:latents => :obj1 => :log_mass]
 
-    mass = {:latents => :obj1 => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
+    log_mass = {:latents => :obj1 => :log_mass} ~ normal(prev_log_mass, 1.0)
 
-    return mass
+    return log_mass
 end
 
 const proposal = particle_filter_proposal
@@ -90,7 +88,7 @@ end
 ################################################################################
 
 function extract_particle_filter_masses(traces)
-    [get_choices(tr)[:latents => :obj1 => :mass] for tr in traces]
+    [log_mass_to_mass(get_choices(tr)[:latents => :obj1 => :log_mass]) for tr in traces]
 end
 
 function summarize_masses(traces)
@@ -163,8 +161,9 @@ end
 # Synthetic smoke tests
 ################################################################################
 
-function run_smoke_test(T::Int, sim, template; particles=20, rejuv_moves=1)
-    tr, = Gen.generate(particle_filter_model, (T, sim, template))
+function run_smoke_test(T::Int, sim, template; particles=20, rejuv_moves=1, ground_truth_mass=nothing)
+    true_mass = ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
+    tr, = Gen.generate(particle_filter_model, (T, sim, template), mass_constraint(true_mass))
     observed_positions = observations_from_trace(tr)
     obs = make_observations(observed_positions)
 
@@ -172,6 +171,7 @@ function run_smoke_test(T::Int, sim, template; particles=20, rejuv_moves=1)
 
     return (
         true_trace = tr,
+        ground_truth_mass = true_mass,
         observed_positions = observed_positions,
         obs = obs,
         posterior_traces = traces,
@@ -179,8 +179,9 @@ function run_smoke_test(T::Int, sim, template; particles=20, rejuv_moves=1)
     )
 end
 
-function run_history_smoke_test(T::Int, sim, template; particles=30, rejuv_moves=2)
-    true_trace, = Gen.generate(particle_filter_model, (T, sim, template))
+function run_history_smoke_test(T::Int, sim, template; particles=30, rejuv_moves=2, ground_truth_mass=nothing)
+    true_mass = ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
+    true_trace, = Gen.generate(particle_filter_model, (T, sim, template), mass_constraint(true_mass))
     observed_positions = observations_from_trace(true_trace)
     obs = make_observations(observed_positions)
 
@@ -189,6 +190,7 @@ function run_history_smoke_test(T::Int, sim, template; particles=30, rejuv_moves
 
     return (
         true_trace = true_trace,
+        ground_truth_mass = true_mass,
         observed_positions = observed_positions,
         obs = obs,
         history = history,

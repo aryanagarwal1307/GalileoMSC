@@ -29,7 +29,10 @@ function make_pf_timing_spec(; label,
     )
 end
 
-function _model_config(model_key::Symbol; drift_std::Float64=0.25, msc_params::MSCParams=DEFAULT_MSC_PARAMS)
+function _model_config(model_key::Symbol;
+                       drift_std::Float64=0.25,
+                       proposal_drift_std::Float64=0.25,
+                       msc_params::MSCParams=DEFAULT_MSC_PARAMS)
     if model_key in (:particle_filter, :particlefilter, :pf, :static)
         return (
             key = :particle_filter,
@@ -45,8 +48,12 @@ function _model_config(model_key::Symbol; drift_std::Float64=0.25, msc_params::M
             label = "drift model",
             pf_model = drift_model,
             gm_args_builder = (T, sim, template) -> (T, sim, template, drift_std),
-            history_runner = drift_inference_with_history,
-            timing_spec = drift_timing_spec(label="drift model", drift_std=drift_std)
+            history_runner = (gm_args, obs, particles, rejuv_moves) ->
+                drift_inference_with_history(gm_args, obs, particles, rejuv_moves;
+                                             proposal_drift_std=proposal_drift_std),
+            timing_spec = drift_timing_spec(label="drift model",
+                                            drift_std=drift_std,
+                                            proposal_drift_std=proposal_drift_std)
         )
     elseif model_key in (:msc, :msc_model, :collision_msc)
         return (
@@ -62,44 +69,97 @@ function _model_config(model_key::Symbol; drift_std::Float64=0.25, msc_params::M
     end
 end
 
-_model_config(model_key::AbstractString; drift_std::Float64=0.25, msc_params::MSCParams=DEFAULT_MSC_PARAMS) =
-    _model_config(Symbol(model_key); drift_std=drift_std, msc_params=msc_params)
+_model_config(model_key::AbstractString;
+              drift_std::Float64=0.25,
+              proposal_drift_std::Float64=0.25,
+              msc_params::MSCParams=DEFAULT_MSC_PARAMS) =
+    _model_config(Symbol(model_key);
+                  drift_std=drift_std,
+                  proposal_drift_std=proposal_drift_std,
+                  msc_params=msc_params)
 
-function _model_config(config::NamedTuple; drift_std::Float64=0.25, msc_params::MSCParams=DEFAULT_MSC_PARAMS)
+function _model_config(config::NamedTuple;
+                       drift_std::Float64=0.25,
+                       proposal_drift_std::Float64=0.25,
+                       msc_params::MSCParams=DEFAULT_MSC_PARAMS)
     required = (:key, :label, :pf_model, :gm_args_builder, :history_runner, :timing_spec)
     all(key -> haskey(config, key), required) ||
         error("Custom model configs must include: $(join(string.(required), ", ")).")
     return config
 end
 
-function _resolve_model_configs(models; drift_std::Float64=0.25, msc_params::MSCParams=DEFAULT_MSC_PARAMS)
+function _resolve_model_configs(models;
+                                drift_std::Float64=0.25,
+                                proposal_drift_std::Float64=0.25,
+                                msc_params::MSCParams=DEFAULT_MSC_PARAMS)
     items = models isa AbstractVector ? models : [models]
-    return [_model_config(item; drift_std=drift_std, msc_params=msc_params) for item in items]
+    return [_model_config(item;
+                          drift_std=drift_std,
+                          proposal_drift_std=proposal_drift_std,
+                          msc_params=msc_params) for item in items]
 end
 
-function timing_spec(model_key; drift_std::Float64=0.25, msc_params::MSCParams=DEFAULT_MSC_PARAMS)
+function timing_spec(model_key;
+                     drift_std::Float64=0.25,
+                     proposal_drift_std::Float64=0.25,
+                     msc_params::MSCParams=DEFAULT_MSC_PARAMS)
     if model_key isa NamedTuple && haskey(model_key, :pf_model)
         return model_key
     end
-    return _model_config(model_key; drift_std=drift_std, msc_params=msc_params).timing_spec
+    return _model_config(model_key;
+                         drift_std=drift_std,
+                         proposal_drift_std=proposal_drift_std,
+                         msc_params=msc_params).timing_spec
 end
 
-function _resolve_timing_specs(model_specs; drift_std::Float64=0.25, msc_params::MSCParams=DEFAULT_MSC_PARAMS)
+function _resolve_timing_specs(model_specs;
+                               drift_std::Float64=0.25,
+                               proposal_drift_std::Float64=0.25,
+                               msc_params::MSCParams=DEFAULT_MSC_PARAMS)
     items = model_specs isa AbstractVector ? model_specs : [model_specs]
-    return [timing_spec(item; drift_std=drift_std, msc_params=msc_params) for item in items]
+    return [timing_spec(item;
+                        drift_std=drift_std,
+                        proposal_drift_std=proposal_drift_std,
+                        msc_params=msc_params) for item in items]
 end
 
-function _scene_source_from_arg(scene_model, scene_args_builder, specs, drift_std::Float64, msc_params::MSCParams)
+function _scene_source_from_arg(scene_model, scene_args_builder, specs,
+                                drift_std::Float64,
+                                proposal_drift_std::Float64,
+                                msc_params::MSCParams)
     if scene_model === nothing
         return (specs[1].pf_model, specs[1].gm_args_builder)
     elseif scene_model isa Symbol || scene_model isa AbstractString
-        spec = timing_spec(scene_model; drift_std=drift_std, msc_params=msc_params)
+        spec = timing_spec(scene_model;
+                           drift_std=drift_std,
+                           proposal_drift_std=proposal_drift_std,
+                           msc_params=msc_params)
         return (spec.pf_model, spec.gm_args_builder)
     else
         isnothing(scene_args_builder) &&
             error("scene_args_builder is required when scene_model is a Gen function.")
         return (scene_model, scene_args_builder)
     end
+end
+
+function _merge_constraints(base_constraints, ground_truth_mass)
+    constraints = base_constraints === nothing ? Gen.choicemap() : base_constraints
+    if ground_truth_mass !== nothing
+        constraints[:latents => :obj1 => :log_mass] = mass_to_log_mass(ground_truth_mass)
+    end
+    return constraints
+end
+
+function _ground_truth_mass_from_trace(tr::Gen.Trace)
+    try
+        return log_mass_to_mass(get_choices(tr)[:latents => :obj1 => :log_mass])
+    catch
+        return nothing
+    end
+end
+
+function _resolve_ground_truth_mass(template, ground_truth_mass)
+    return ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
 end
 
 """
@@ -112,19 +172,24 @@ function sample_shared_scene_bank(T::Int, sim, template;
                                   n_scenes::Int=10,
                                   scene_model=particle_filter_model,
                                   scene_args_builder=(T, sim, template) -> (T, sim, template),
+                                  scene_constraints=nothing,
+                                  ground_truth_mass=nothing,
                                   seed::Int=1)
     Random.seed!(seed)
     scenes = Vector{NamedTuple}(undef, n_scenes)
     scene_args = scene_args_builder(T, sim, template)
+    actual_ground_truth_mass = _resolve_ground_truth_mass(template, ground_truth_mass)
+    constraints = _merge_constraints(scene_constraints, actual_ground_truth_mass)
 
     for scene_idx in 1:n_scenes
-        true_trace, = Gen.generate(scene_model, scene_args)
+        true_trace, = Gen.generate(scene_model, scene_args, constraints)
         observed_positions = observations_from_trace(true_trace)
         obs = make_observations(observed_positions)
 
         scenes[scene_idx] = (
             scene_idx = scene_idx,
             true_trace = true_trace,
+            ground_truth_mass = _ground_truth_mass_from_trace(true_trace),
             observed_positions = observed_positions,
             obs = obs,
             collision_time = detect_collision_time(observed_positions)
@@ -224,20 +289,31 @@ function plot_step_runtime_comparison(model_specs;
                                       n_scenes::Int=10,
                                       scene_model=nothing,
                                       scene_args_builder=nothing,
+                                      scene_constraints=nothing,
+                                      ground_truth_mass=nothing,
                                       particles::Int=30,
                                       rejuv_moves::Int=2,
                                       drift_std::Float64=0.25,
+                                      proposal_drift_std::Float64=0.25,
                                       msc_params::MSCParams=DEFAULT_MSC_PARAMS,
                                       seed::Int=1,
                                       warmup::Bool=true,
                                       summary::Symbol=:mean)
-    specs = _resolve_timing_specs(model_specs; drift_std=drift_std, msc_params=msc_params)
-    source_model, source_args_builder = _scene_source_from_arg(scene_model, scene_args_builder, specs, drift_std, msc_params)
+    specs = _resolve_timing_specs(model_specs;
+                                  drift_std=drift_std,
+                                  proposal_drift_std=proposal_drift_std,
+                                  msc_params=msc_params)
+    source_model, source_args_builder = _scene_source_from_arg(scene_model, scene_args_builder, specs,
+                                                               drift_std,
+                                                               proposal_drift_std,
+                                                               msc_params)
 
     scene_bank = isnothing(scenes) ? sample_shared_scene_bank(T, sim, template;
                                                               n_scenes=n_scenes,
                                                               scene_model=source_model,
                                                               scene_args_builder=source_args_builder,
+                                                              scene_constraints=scene_constraints,
+                                                              ground_truth_mass=ground_truth_mass,
                                                               seed=seed) : scenes
 
     results = [benchmark_step_runtime(spec, scene_bank, T, sim, template;
@@ -289,25 +365,37 @@ function run_mass_ratio_history_comparison(models;
                                            observed_positions=nothing,
                                            scene_model=nothing,
                                            scene_args_builder=nothing,
+                                           scene_constraints=nothing,
+                                           ground_truth_mass=nothing,
                                            particles::Int=30,
                                            rejuv_moves::Int=2,
                                            drift_std::Float64=0.25,
+                                           proposal_drift_std::Float64=0.25,
                                            msc_params::MSCParams=DEFAULT_MSC_PARAMS,
                                            seed::Int=1)
-    configs = _resolve_model_configs(models; drift_std=drift_std, msc_params=msc_params)
+    configs = _resolve_model_configs(models;
+                                     drift_std=drift_std,
+                                     proposal_drift_std=proposal_drift_std,
+                                     msc_params=msc_params)
 
     true_trace = nothing
     if obs === nothing
         if observed_positions === nothing
             Random.seed!(seed)
-            source_model, source_builder = _scene_source_from_arg(scene_model, scene_args_builder, [configs[1].timing_spec], drift_std, msc_params)
-            true_trace, = Gen.generate(source_model, source_builder(T, sim, template))
+            source_model, source_builder = _scene_source_from_arg(scene_model, scene_args_builder, [configs[1].timing_spec],
+                                                                  drift_std,
+                                                                  proposal_drift_std,
+                                                                  msc_params)
+            actual_ground_truth_mass = _resolve_ground_truth_mass(template, ground_truth_mass)
+            constraints = _merge_constraints(scene_constraints, actual_ground_truth_mass)
+            true_trace, = Gen.generate(source_model, source_builder(T, sim, template), constraints)
             observed_positions = observations_from_trace(true_trace)
         end
         obs = make_observations(observed_positions)
     end
 
     collision_time = observed_positions === nothing ? nothing : detect_collision_time(observed_positions)
+    actual_ground_truth_mass = true_trace === nothing ? ground_truth_mass : _ground_truth_mass_from_trace(true_trace)
     results = Vector{NamedTuple}(undef, length(configs))
 
     for (idx, config) in enumerate(configs)
@@ -324,6 +412,7 @@ function run_mass_ratio_history_comparison(models;
     return (
         results = results,
         true_trace = true_trace,
+        ground_truth_mass = actual_ground_truth_mass,
         observed_positions = observed_positions,
         obs = obs,
         collision_time = collision_time
@@ -358,7 +447,42 @@ function _is_history_vector(x)
     return x isa AbstractVector && !isempty(x) && hasproperty(x[1], :t)
 end
 
-function plot_mass_ratio_history(history; collision_time=nothing, use_quantiles=true, label="posterior mean")
+function _bin_mass_history(history, time_bin_size::Int)
+    time_bin_size >= 1 || error("time_bin_size must be at least 1.")
+    time_bin_size == 1 && return history
+
+    sorted_history = sort(collect(history); by=h -> h.t)
+    isempty(sorted_history) && return sorted_history
+
+    binned = NamedTuple[]
+    first_t = minimum([h.t for h in sorted_history])
+    last_t = maximum([h.t for h in sorted_history])
+
+    for bin_start in first_t:time_bin_size:last_t
+        bin_stop = bin_start + time_bin_size - 1
+        rows = [h for h in sorted_history if bin_start <= h.t <= bin_stop]
+        isempty(rows) && continue
+
+        push!(binned, (
+            t = mean([h.t for h in rows]),
+            mean = mean([h.mean for h in rows]),
+            std = mean([h.std for h in rows]),
+            q05 = mean([h.q05 for h in rows]),
+            q25 = mean([h.q25 for h in rows]),
+            q75 = mean([h.q75 for h in rows]),
+            q95 = mean([h.q95 for h in rows])
+        ))
+    end
+
+    return binned
+end
+
+function plot_mass_ratio_history(history;
+                                 collision_time=nothing,
+                                 use_quantiles=false,
+                                 label="posterior mean",
+                                 time_bin_size::Int=1)
+    history = _bin_mass_history(history, time_bin_size)
     ts = [h.t for h in history]
     means = [h.mean for h in history]
 
@@ -390,8 +514,20 @@ end
 
 function plot_mass_ratio_history_comparison(history_results;
                                             collision_time=nothing,
-                                            use_quantiles::Bool=true,
+                                            ground_truth_mass=nothing,
+                                            use_quantiles::Bool=false,
+                                            time_bin_size::Int=1,
                                             title::AbstractString="Posterior mass ratio over time")
+    time_bin_size >= 1 || error("time_bin_size must be at least 1.")
+
+    result_ground_truth_mass = if ground_truth_mass !== nothing
+        ground_truth_mass
+    elseif hasproperty(history_results, :ground_truth_mass)
+        history_results.ground_truth_mass
+    else
+        nothing
+    end
+
     items = hasproperty(history_results, :results) ? history_results.results : history_results
     items = items isa AbstractVector ? items : [items]
 
@@ -401,7 +537,7 @@ function plot_mass_ratio_history_comparison(history_results;
                    legend=:topright)
 
     for (idx, item) in enumerate(items)
-        history = _history_value(item)
+        history = _bin_mass_history(_history_value(item), time_bin_size)
         label = _history_label(item, idx)
         ts = [h.t for h in history]
         means = [h.mean for h in history]
@@ -430,6 +566,10 @@ function plot_mass_ratio_history_comparison(history_results;
 
     for (idx, ct) in enumerate(collision_times)
         Plots.vline!(p, [ct], label=idx == 1 ? "collision time" : "", lw=2, ls=:dash)
+    end
+
+    if result_ground_truth_mass !== nothing
+        Plots.hline!(p, [result_ground_truth_mass]; label="true mass ratio", lw=2, ls=:dot, color=:black)
     end
 
     return p
