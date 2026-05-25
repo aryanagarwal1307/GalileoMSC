@@ -37,8 +37,8 @@ function usage()
       --T N                      Number of time steps [120]
       --particles N              Particle count [20]
       --rejuv-moves N            Rejuvenation moves per step [1]
-      --drift-std X              Drift model log-mass transition std [0.25]
-      --proposal-drift-std X     Drift model log-mass MH proposal std [0.25]
+      --drift-std X              Drift model mass transition std [1.5]
+      --proposal-drift-std X     Drift model mass MH proposal std [0.25]
       --time-bin-size N          Plot bin width in time steps [10]
       --seed N                   Base inference seed [11]
       --scene-seed N             Seed for the shared observed scene [11]
@@ -61,7 +61,7 @@ function parse_cli(args)
         "T" => "120",
         "particles" => "20",
         "rejuv_moves" => "1",
-        "drift_std" => "0.25",
+        "drift_std" => "1.5",
         "proposal_drift_std" => "0.25",
         "time_bin_size" => "10",
         "seed" => "11",
@@ -184,7 +184,7 @@ function generate_observed_positions(config)
         error("Unsupported --scene-model $(config.scene_model). Use particle_filter or drift.")
     end
 
-    ground_truth_mass = log_mass_to_mass(get_choices(trace)[:latents => :obj1 => :log_mass])
+    ground_truth_mass = get_choices(trace)[:latents => :obj1 => :mass]
     observed_positions = observations_from_trace(trace)
     collision_time = detect_collision_time(observed_positions)
     disconnect_scene(scene)
@@ -481,8 +481,8 @@ function write_metadata_csv(path, config, collision_time, ground_truth_mass, ela
         ["scene_model", config.scene_model],
         ["mass_ratio", config.mass_ratio],
         ["ground_truth_mass", ground_truth_mass],
-        ["ground_truth_mass_address", ":latents => :obj1 => :log_mass"],
-        ["ground_truth_mass_note", "Synthetic scene generation constrains log(mass ratio); stored ground_truth_mass is exp(log_mass). For drift scene generation this is the constrained initial mass."],
+        ["ground_truth_mass_address", ":latents => :obj1 => :mass"],
+        ["ground_truth_mass_note", "Synthetic scene generation constrains the initial mass ratio. For drift scene generation this is the constrained initial mass."],
         ["obj_frictions", join(config.obj_frictions, ",")],
         ["obj_positions", join(config.obj_positions, ",")],
         ["slope", config.slope],

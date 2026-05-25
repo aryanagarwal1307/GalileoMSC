@@ -30,7 +30,7 @@ function make_pf_timing_spec(; label,
 end
 
 function _model_config(model_key::Symbol;
-                       drift_std::Float64=0.25,
+                       drift_std::Float64=1.5,
                        proposal_drift_std::Float64=0.25,
                        msc_params::MSCParams=DEFAULT_MSC_PARAMS)
     if model_key in (:particle_filter, :particlefilter, :pf, :static)
@@ -70,7 +70,7 @@ function _model_config(model_key::Symbol;
 end
 
 _model_config(model_key::AbstractString;
-              drift_std::Float64=0.25,
+              drift_std::Float64=1.5,
               proposal_drift_std::Float64=0.25,
               msc_params::MSCParams=DEFAULT_MSC_PARAMS) =
     _model_config(Symbol(model_key);
@@ -79,7 +79,7 @@ _model_config(model_key::AbstractString;
                   msc_params=msc_params)
 
 function _model_config(config::NamedTuple;
-                       drift_std::Float64=0.25,
+                       drift_std::Float64=1.5,
                        proposal_drift_std::Float64=0.25,
                        msc_params::MSCParams=DEFAULT_MSC_PARAMS)
     required = (:key, :label, :pf_model, :gm_args_builder, :history_runner, :timing_spec)
@@ -89,7 +89,7 @@ function _model_config(config::NamedTuple;
 end
 
 function _resolve_model_configs(models;
-                                drift_std::Float64=0.25,
+                                drift_std::Float64=1.5,
                                 proposal_drift_std::Float64=0.25,
                                 msc_params::MSCParams=DEFAULT_MSC_PARAMS)
     items = models isa AbstractVector ? models : [models]
@@ -100,7 +100,7 @@ function _resolve_model_configs(models;
 end
 
 function timing_spec(model_key;
-                     drift_std::Float64=0.25,
+                     drift_std::Float64=1.5,
                      proposal_drift_std::Float64=0.25,
                      msc_params::MSCParams=DEFAULT_MSC_PARAMS)
     if model_key isa NamedTuple && haskey(model_key, :pf_model)
@@ -113,7 +113,7 @@ function timing_spec(model_key;
 end
 
 function _resolve_timing_specs(model_specs;
-                               drift_std::Float64=0.25,
+                               drift_std::Float64=1.5,
                                proposal_drift_std::Float64=0.25,
                                msc_params::MSCParams=DEFAULT_MSC_PARAMS)
     items = model_specs isa AbstractVector ? model_specs : [model_specs]
@@ -145,14 +145,14 @@ end
 function _merge_constraints(base_constraints, ground_truth_mass)
     constraints = base_constraints === nothing ? Gen.choicemap() : base_constraints
     if ground_truth_mass !== nothing
-        constraints[:latents => :obj1 => :log_mass] = mass_to_log_mass(ground_truth_mass)
+        constraints[:latents => :obj1 => :mass] = Float64(ground_truth_mass)
     end
     return constraints
 end
 
 function _ground_truth_mass_from_trace(tr::Gen.Trace)
     try
-        return log_mass_to_mass(get_choices(tr)[:latents => :obj1 => :log_mass])
+        return get_choices(tr)[:latents => :obj1 => :mass]
     catch
         return nothing
     end
@@ -293,7 +293,7 @@ function plot_step_runtime_comparison(model_specs;
                                       ground_truth_mass=nothing,
                                       particles::Int=30,
                                       rejuv_moves::Int=2,
-                                      drift_std::Float64=0.25,
+                                      drift_std::Float64=1.5,
                                       proposal_drift_std::Float64=0.25,
                                       msc_params::MSCParams=DEFAULT_MSC_PARAMS,
                                       seed::Int=1,
@@ -369,7 +369,7 @@ function run_mass_ratio_history_comparison(models;
                                            ground_truth_mass=nothing,
                                            particles::Int=30,
                                            rejuv_moves::Int=2,
-                                           drift_std::Float64=0.25,
+                                           drift_std::Float64=1.5,
                                            proposal_drift_std::Float64=0.25,
                                            msc_params::MSCParams=DEFAULT_MSC_PARAMS,
                                            seed::Int=1)

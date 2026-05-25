@@ -3,12 +3,12 @@
 ################################################################################
 
 """
-Drift the unknown object's mass ratio in log space.
+Drift the unknown object's mass around its previous value.
 """
 @gen function drift_object(ls::RigidBodyLatents, drift_std::Float64)
-    prev_log_mass = mass_to_log_mass(ls.data.mass)
-    log_mass_delta ~ normal(0.0, drift_std)
-    return update_latents(ls, log_mass_to_mass(prev_log_mass + log_mass_delta))
+    prev_mass = ls.data.mass
+    mass ~ trunc_norm(prev_mass, drift_std, 0.0, Inf)
+    return update_latents(ls, mass)
 end
 
 """
@@ -49,15 +49,15 @@ end
 ################################################################################
 
 """
-MH proposal for the log-mass drift at a specific time t.
+MH proposal for the drifted mass at a specific time t.
 Address path is:
-:states => t => :drift => :obj1 => :log_mass_delta
+:states => t => :drift => :obj1 => :mass
 """
 @gen function drift_proposal(tr::Gen.Trace, t::Int, proposal_drift_std::Float64)
     choices = get_choices(tr)
-    prev_log_mass_delta = choices[:states => t => :drift => :obj1 => :log_mass_delta]
-    log_mass_delta = {:states => t => :drift => :obj1 => :log_mass_delta} ~ normal(prev_log_mass_delta, proposal_drift_std)
-    return log_mass_delta
+    prev_mass = choices[:states => t => :drift => :obj1 => :mass]
+    mass = {:states => t => :drift => :obj1 => :mass} ~ trunc_norm(prev_mass, proposal_drift_std, 0.0, Inf)
+    return mass
 end
 
 function drift_inference_procedure(gm_args::Tuple,
@@ -173,7 +173,7 @@ function run_drift_smoke_test(T::Int, sim, template, drift_std::Float64;
 end
 
 function drift_timing_spec(; label="drift model",
-                           drift_std::Float64=0.25,
+                           drift_std::Float64=1.5,
                            proposal_drift_std::Float64=0.25)
     return make_pf_timing_spec(
         label = label,

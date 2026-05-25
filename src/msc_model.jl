@@ -152,9 +152,9 @@ end
 
 @gen function msc_proposal(tr::Gen.Trace)
     choices = get_choices(tr)
-    prev_log_mass = choices[:latents => :obj1 => :log_mass]
-    log_mass = {:latents => :obj1 => :log_mass} ~ normal(prev_log_mass, 1.0)
-    return log_mass
+    prev_mass = choices[:latents => :obj1 => :mass]
+    mass = {:latents => :obj1 => :mass} ~ trunc_norm(prev_mass, 1.5, 0.0, Inf)
+    return mass
 end
 
 ################################################################################

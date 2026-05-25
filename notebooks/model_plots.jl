@@ -20,7 +20,7 @@ begin
     T = 120
     particles = 20
     rejuv_moves = 1
-    drift_std = 0.25
+    drift_std = 1.5
     true_mass_ratio = 2.0
     time_bin_size = 10
 end

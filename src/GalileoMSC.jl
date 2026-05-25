@@ -23,10 +23,6 @@ export
     # common helpers
     observe,
     update_latents,
-    LOG_MASS_LOW,
-    LOG_MASS_HIGH,
-    mass_to_log_mass,
-    log_mass_to_mass,
     sample_object,
     prior,
     make_observations,

@@ -29,17 +29,19 @@ const model = particle_filter_model
 ################################################################################
 
 """
-This proposal function implements a random walk for the ramp object's log mass.
+This proposal function implements a random walk for the ramp object's mass.
+
+The proposal is truncated so the sampled mass stays physically valid.
 """
 @gen function particle_filter_proposal(tr::Gen.Trace)
     choices = get_choices(tr)
 
-    # Only obj1 log mass is random in the prior.
-    prev_log_mass = choices[:latents => :obj1 => :log_mass]
+    # Only obj1 mass is random in the prior.
+    prev_mass = choices[:latents => :obj1 => :mass]
 
-    log_mass = {:latents => :obj1 => :log_mass} ~ normal(prev_log_mass, 1.0)
+    mass = {:latents => :obj1 => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
 
-    return log_mass
+    return mass
 end
 
 const proposal = particle_filter_proposal
@@ -88,7 +90,7 @@ end
 ################################################################################
 
 function extract_particle_filter_masses(traces)
-    [log_mass_to_mass(get_choices(tr)[:latents => :obj1 => :log_mass]) for tr in traces]
+    [get_choices(tr)[:latents => :obj1 => :mass] for tr in traces]
 end
 
 function summarize_masses(traces)
