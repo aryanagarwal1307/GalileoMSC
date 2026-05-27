@@ -17,44 +17,150 @@ Base.@kwdef struct MSCParams
     age_decay_steps::Float64 = 8.0              # gradual decay of survival
 end
 
-"""
-A single collision capsule for the two-object ramp scene.
+# This is the abstract type for a capsule. 
+abstract type MSC end
 
-When `active == false`, `age` counts steps since the capsule was last active.
-When `active == true`, `age` counts how long the capsule has persisted.
-"""
-struct CollisionMSC
-    a::Int
-    b::Int
-    active::Bool
-    age::Int
-end
-
+# This struct is common to all capsules, basic diagnostic / functional stats
 struct MSCEventStats
     birth_prob::Float64
     survival_prob::Float64
     switch_prob::Float64
+    start_t::Int                # when the capsule started (for plotting)
+    age::Int                    # how long the capsule has persisted
 end
 
+# This is a capsule kind - collision of two objects (by ID)
+struct CollisionMSC <: MSC
+    a::Int
+    b::Int
+    age::Int              
+end
+
+# This is a capsule kind - sliding of one object (by ID) (just an example for now)
+struct SlidingMSC <: MSC
+    a::Int
+    surface::Int
+    age::Int
+end
+
+# Here we track the state of the entire scene
 struct MSCState
+    # Vector of all (interacting) objects in the scene as a Bullet State
     objects::BulletState
-    capsule::CollisionMSC
+    # Vector of all active capsules in the scene
+    capsules::Vector{MSC}
+    # Statistics for diagnostoc / plotting reasons 
     event_stats::MSCEventStats
 end
+
+# A diff structure for one object, all latents to be updated
+struct ObjectDiff
+    object_id::Int
+    changes::Dict{Symbol, Float64}
+end
+
+# A diff structure for all objects in a capsule, all latents to be updated
+struct CapsuleDiff
+    diffs::Vector{ObjectDiff}
+end
+
+
+#### Helpers to manage capsules ####
+
+# Helper to calculate collision birth and death probability
+function collision_helper(objects::BulletState, a::Int, b::Int, params::MSCParams)
+    # Extract kinematic properties from the bullet state 
+    ka = objects.kinematics[a]
+    kb = objects.kinematics[b]
+
+    # Distance in 2D 
+    offset = kb.position .- ka.position
+    distance = norm(offset)
+
+    # Calculate a distance based weight for bernoulli birth / death
+    close_score = exp(-((distance / params.birth_distance_scale)^2))
+    near_score = exp(-((distance / params.survival_distance_scale)^2))
+
+    return (
+        distance = distance,
+        closing_speed = closing_speed,
+        close_score = close_score,
+        near_score = near_score
+    )
+end
+
+# Helper to check if a collision capsule is equal to the proposed one
+function is_same_collision(cap::MSC, a::Int, b::Int)
+    return cap isa CollisionMSC &&
+           ((cap.a == a && cap.b == b) || (cap.a == b && cap.b == a))
+end
+
+# Helper to check if a collision capsule is already in the given vector 
+function has_active_collision(capsules::Vector{MSC}, a::Int, b::Int)
+    return any(cap -> is_same_collision(cap, a, b), capsules)
+end
+
+# Helper to increase the age of a capsule 
+function increment_age(cap::CollisionMSC)
+    return CollisionMSC(cap.a, cap.b, cap.age + 1)
+end
+
+# Get all possible capsules that can be activated at a given time
+function enumerate_collision_birth_candidates(st::MSCState, active_capsules::Vector{MSC}, params::MSCParams)
+    candidates = NamedTuple[]
+
+    n_objects = length(st.objects.kinematics)
+
+    for a in 1:(n_objects - 1)
+        for b in (a + 1):n_objects
+            # Check if this capsule is already active 
+            if has_active_collision(active_capsules, a, b)
+                continue
+            end
+
+            # get the distance features 
+            features = collision_helper(st.objects, a, b, params)
+
+            # Closer objects get larger birth weight.
+            weight = features.close_score
+            weight = max(weight, 1e-8)
+
+            push!(candidates, (
+                kind = :collision,
+                a = a,
+                b = b,
+                distance = features.distance,
+                weight = weight
+            ))
+        end
+    end
+
+    return candidates
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 const msc_positions = Gen.Map(observe)
 const DEFAULT_MSC_PARAMS = MSCParams()
 
 function default_msc_capsule(params::MSCParams=DEFAULT_MSC_PARAMS)
-    return CollisionMSC(1, 2, false, params.cooldown_steps)
+    return CollisionMSC(1, 2, false, params.cooldown_steps, MSCEventStats(0.0, 0.0, 0.0))
 end
 
-function default_msc_event_stats()
-    return MSCEventStats(0.0, 0.0, 0.0)
-end
-
-function initial_msc_state(objects::BulletState, params::MSCParams=DEFAULT_MSC_PARAMS)
-    return MSCState(objects, default_msc_capsule(params), default_msc_event_stats())
+function initial_msc_state(objects::AbstractVector{<:BulletElement}, params::MSCParams=DEFAULT_MSC_PARAMS)
+    return MSCState(objects, [default_msc_capsule(params)])
 end
 
 function _clamp_probability(p::Real)
