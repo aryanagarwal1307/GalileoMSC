@@ -17,7 +17,7 @@ end
     latents ~ prior(template.latents)
     init_state = Accessors.setproperties(template; latents=latents)
 
-    # simulate `T` timesteps; kind of like a cool for-loop
+    # simulate `T` timesteps; kind of like a for-loop
     states ~ Gen.Unfold(particle_filter_physics_step)(T, init_state, sim)
     return states
 end

@@ -39,6 +39,12 @@ function usage()
       --rejuv-moves N            Rejuvenation moves per step [1]
       --drift-std X              Drift model mass transition std [1.5]
       --proposal-drift-std X     Drift model mass MH proposal std [0.25]
+      --msc-birth-distance-scale X [0.55]
+      --msc-survival-distance-scale X [0.45]
+      --msc-min-active-steps N    [4]
+      --msc-min-age-survival X    [1.0]
+      --msc-age-decay-steps X     [5.0]
+      --msc-no-birth-weight X     [0.3]
       --time-bin-size N          Plot bin width in time steps [10]
       --seed N                   Base inference seed [11]
       --scene-seed N             Seed for the shared observed scene [11]
@@ -63,6 +69,12 @@ function parse_cli(args)
         "rejuv_moves" => "1",
         "drift_std" => "1.5",
         "proposal_drift_std" => "0.25",
+        "msc_birth_distance_scale" => "0.55",
+        "msc_survival_distance_scale" => "0.45",
+        "msc_min_active_steps" => "4",
+        "msc_min_age_survival" => "1.0",
+        "msc_age_decay_steps" => "5.0",
+        "msc_no_birth_weight" => "0.3",
         "time_bin_size" => "10",
         "seed" => "11",
         "scene_seed" => "11",
@@ -127,6 +139,14 @@ function build_config(opts)
         rejuv_moves = parse(Int, opts["rejuv_moves"]),
         drift_std = parse(Float64, opts["drift_std"]),
         proposal_drift_std = parse(Float64, opts["proposal_drift_std"]),
+        msc_params = MSCParams(
+            birth_distance_scale = parse(Float64, opts["msc_birth_distance_scale"]),
+            survival_distance_scale = parse(Float64, opts["msc_survival_distance_scale"]),
+            min_active_steps = parse(Int, opts["msc_min_active_steps"]),
+            min_age_survival = parse(Float64, opts["msc_min_age_survival"]),
+            age_decay_steps = parse(Float64, opts["msc_age_decay_steps"]),
+            no_birth_weight = parse(Float64, opts["msc_no_birth_weight"])
+        ),
         time_bin_size = parse(Int, opts["time_bin_size"]),
         seed = parse(Int, opts["seed"]),
         scene_seed = parse(Int, opts["scene_seed"]),
@@ -179,9 +199,11 @@ function generate_observed_positions(config)
         first(Gen.generate(particle_filter_model, (config.T, scene.sim, scene.init_state), constraints))
     elseif config.scene_model in (:drift, :drift_model)
         first(Gen.generate(drift_model, (config.T, scene.sim, scene.init_state, config.drift_std), constraints))
+    elseif config.scene_model in (:msc, :msc_model, :collision_msc)
+        first(Gen.generate(msc_model, (config.T, scene.sim, scene.init_state, config.msc_params), constraints))
     else
         disconnect_scene(scene)
-        error("Unsupported --scene-model $(config.scene_model). Use particle_filter or drift.")
+        error("Unsupported --scene-model $(config.scene_model). Use particle_filter, drift, or msc.")
     end
 
     ground_truth_mass = get_choices(trace)[:latents => :obj1 => :mass]
@@ -211,6 +233,33 @@ function _galileo_make_scene(task)
     )
 end
 
+function _galileo_history_row(h)
+    row = (
+        t = Int(h.t),
+        mean = Float64(h.mean),
+        std = Float64(h.std),
+        q05 = Float64(h.q05),
+        q25 = Float64(h.q25),
+        q75 = Float64(h.q75),
+        q95 = Float64(h.q95)
+    )
+
+    if hasproperty(h, :capsule_active_prob)
+        return merge(row, (
+            capsule_active_prob = Float64(h.capsule_active_prob),
+            capsule_switch_prob = Float64(h.capsule_switch_prob),
+            capsule_birth_prob = Float64(h.capsule_birth_prob),
+            capsule_death_prob = Float64(h.capsule_death_prob),
+            capsule_mean_active_count = Float64(h.capsule_mean_active_count),
+            capsule_mean_death_count = Float64(h.capsule_mean_death_count),
+            capsule_mean_age = Float64(h.capsule_mean_age),
+            capsule_mean_birth_probability = Float64(h.capsule_mean_birth_probability)
+        ))
+    end
+
+    return row
+end
+
 function _galileo_run_mass_task(task)
     Random.seed!(task.seed)
     scene = _galileo_make_scene(task)
@@ -229,22 +278,12 @@ function _galileo_run_mass_task(task)
         rejuv_moves = task.rejuv_moves,
         drift_std = task.drift_std,
         proposal_drift_std = task.proposal_drift_std,
+        msc_params = task.msc_params,
         seed = task.seed
     )
 
     model_result = result.results[1]
-    history = [
-        (
-            t = Int(h.t),
-            mean = Float64(h.mean),
-            std = Float64(h.std),
-            q05 = Float64(h.q05),
-            q25 = Float64(h.q25),
-            q75 = Float64(h.q75),
-            q95 = Float64(h.q95)
-        )
-        for h in model_result.history
-    ]
+    history = [_galileo_history_row(h) for h in model_result.history]
 
     elapsed_s = time() - started
     _galileo_disconnect_scene(scene)
@@ -285,6 +324,33 @@ function setup_workers()
                 )
             end
 
+            function _galileo_history_row(h)
+                row = (
+                    t = Int(h.t),
+                    mean = Float64(h.mean),
+                    std = Float64(h.std),
+                    q05 = Float64(h.q05),
+                    q25 = Float64(h.q25),
+                    q75 = Float64(h.q75),
+                    q95 = Float64(h.q95)
+                )
+
+                if hasproperty(h, :capsule_active_prob)
+                    return merge(row, (
+                        capsule_active_prob = Float64(h.capsule_active_prob),
+                        capsule_switch_prob = Float64(h.capsule_switch_prob),
+                        capsule_birth_prob = Float64(h.capsule_birth_prob),
+                        capsule_death_prob = Float64(h.capsule_death_prob),
+                        capsule_mean_active_count = Float64(h.capsule_mean_active_count),
+                        capsule_mean_death_count = Float64(h.capsule_mean_death_count),
+                        capsule_mean_age = Float64(h.capsule_mean_age),
+                        capsule_mean_birth_probability = Float64(h.capsule_mean_birth_probability)
+                    ))
+                end
+
+                return row
+            end
+
             function _galileo_run_mass_task(task)
                 Random.seed!(task.seed)
                 scene = _galileo_make_scene(task)
@@ -303,22 +369,12 @@ function setup_workers()
                     rejuv_moves = task.rejuv_moves,
                     drift_std = task.drift_std,
                     proposal_drift_std = task.proposal_drift_std,
+                    msc_params = task.msc_params,
                     seed = task.seed
                 )
 
                 model_result = result.results[1]
-                history = [
-                    (
-                        t = Int(h.t),
-                        mean = Float64(h.mean),
-                        std = Float64(h.std),
-                        q05 = Float64(h.q05),
-                        q25 = Float64(h.q25),
-                        q75 = Float64(h.q75),
-                        q95 = Float64(h.q95)
-                    )
-                    for h in model_result.history
-                ]
+                history = [_galileo_history_row(h) for h in model_result.history]
 
                 elapsed_s = time() - started
                 _galileo_disconnect_scene(scene)
@@ -355,6 +411,7 @@ function build_tasks(config, observed_positions)
             rejuv_moves = config.rejuv_moves,
             drift_std = config.drift_std,
             proposal_drift_std = config.proposal_drift_std,
+            msc_params = config.msc_params,
             mass_ratio = config.mass_ratio,
             obj_frictions = config.obj_frictions,
             obj_positions = config.obj_positions,
@@ -406,6 +463,81 @@ function summarize_results(task_results)
     return rows
 end
 
+function has_capsule_history(result)
+    return !isempty(result.history) && hasproperty(result.history[1], :capsule_active_prob)
+end
+
+function summarize_capsule_results(task_results)
+    by_model = Dict{Symbol,Vector{NamedTuple}}()
+    for result in task_results
+        has_capsule_history(result) || continue
+        push!(get!(by_model, result.model, NamedTuple[]), result)
+    end
+
+    rows = NamedTuple[]
+    for model in sort(collect(keys(by_model)); by=string)
+        results = sort(by_model[model]; by=r -> r.run)
+        label = results[1].label
+        T = length(results[1].history)
+
+        for t in 1:T
+            active_probs = [r.history[t].capsule_active_prob for r in results]
+            switch_probs = [r.history[t].capsule_switch_prob for r in results]
+            birth_probs = [r.history[t].capsule_birth_prob for r in results]
+            death_probs = [r.history[t].capsule_death_prob for r in results]
+
+            push!(rows, (
+                model = model,
+                label = label,
+                t = t,
+                n_runs = length(results),
+                capsule_active_prob = mean(active_probs),
+                capsule_active_prob_std = length(active_probs) > 1 ? std(active_probs) : 0.0,
+                capsule_switch_prob = mean(switch_probs),
+                capsule_switch_prob_std = length(switch_probs) > 1 ? std(switch_probs) : 0.0,
+                capsule_birth_prob = mean(birth_probs),
+                capsule_birth_prob_std = length(birth_probs) > 1 ? std(birth_probs) : 0.0,
+                capsule_death_prob = mean(death_probs),
+                capsule_death_prob_std = length(death_probs) > 1 ? std(death_probs) : 0.0,
+                capsule_mean_active_count = mean([r.history[t].capsule_mean_active_count for r in results]),
+                capsule_mean_death_count = mean([r.history[t].capsule_mean_death_count for r in results]),
+                capsule_mean_age = mean([r.history[t].capsule_mean_age for r in results]),
+                capsule_mean_birth_probability = mean([r.history[t].capsule_mean_birth_probability for r in results])
+            ))
+        end
+    end
+
+    return rows
+end
+
+function summarize_runtime_results(task_results)
+    by_model = Dict{Symbol,Vector{NamedTuple}}()
+    for result in task_results
+        push!(get!(by_model, result.model, NamedTuple[]), result)
+    end
+
+    rows = NamedTuple[]
+    for model in sort(collect(keys(by_model)); by=string)
+        results = by_model[model]
+        elapsed = [r.elapsed_s for r in results]
+        push!(rows, (
+            model = model,
+            label = results[1].label,
+            n_runs = length(results),
+            elapsed_s_mean = mean(elapsed),
+            elapsed_s_std = length(elapsed) > 1 ? std(elapsed) : 0.0,
+            elapsed_s_min = minimum(elapsed),
+            elapsed_s_max = maximum(elapsed)
+        ))
+    end
+
+    return rows
+end
+
+function maybe_property(x, name::Symbol)
+    return hasproperty(x, name) ? getproperty(x, name) : missing
+end
+
 function csv_escape(x)
     if x === nothing || x === missing
         return ""
@@ -431,14 +563,27 @@ end
 function write_replicates_csv(path, task_results)
     header = [
         "model", "label", "run", "t", "mean", "std",
-        "q05", "q25", "q75", "q95", "seed", "elapsed_s"
+        "q05", "q25", "q75", "q95",
+        "capsule_active_prob", "capsule_switch_prob", "capsule_birth_prob", "capsule_death_prob",
+        "capsule_mean_active_count", "capsule_mean_death_count",
+        "capsule_mean_age", "capsule_mean_birth_probability",
+        "seed", "elapsed_s"
     ]
     rows = Vector{Vector{Any}}()
     for result in sort(task_results; by=r -> (string(r.model), r.run))
         for h in result.history
             push!(rows, [
                 result.model, result.label, result.run, h.t, h.mean, h.std,
-                h.q05, h.q25, h.q75, h.q95, result.seed, result.elapsed_s
+                h.q05, h.q25, h.q75, h.q95,
+                maybe_property(h, :capsule_active_prob),
+                maybe_property(h, :capsule_switch_prob),
+                maybe_property(h, :capsule_birth_prob),
+                maybe_property(h, :capsule_death_prob),
+                maybe_property(h, :capsule_mean_active_count),
+                maybe_property(h, :capsule_mean_death_count),
+                maybe_property(h, :capsule_mean_age),
+                maybe_property(h, :capsule_mean_birth_probability),
+                result.seed, result.elapsed_s
             ])
         end
     end
@@ -462,6 +607,46 @@ function write_summary_csv(path, summary_rows)
     return write_csv(path, header, rows)
 end
 
+function write_capsule_summary_csv(path, capsule_rows)
+    header = [
+        "model", "label", "t", "n_runs",
+        "capsule_active_prob", "capsule_active_prob_std",
+        "capsule_switch_prob", "capsule_switch_prob_std",
+        "capsule_birth_prob", "capsule_birth_prob_std",
+        "capsule_death_prob", "capsule_death_prob_std",
+        "capsule_mean_active_count", "capsule_mean_death_count",
+        "capsule_mean_age", "capsule_mean_birth_probability"
+    ]
+    rows = [
+        [
+            row.model, row.label, row.t, row.n_runs,
+            row.capsule_active_prob, row.capsule_active_prob_std,
+            row.capsule_switch_prob, row.capsule_switch_prob_std,
+            row.capsule_birth_prob, row.capsule_birth_prob_std,
+            row.capsule_death_prob, row.capsule_death_prob_std,
+            row.capsule_mean_active_count, row.capsule_mean_death_count,
+            row.capsule_mean_age, row.capsule_mean_birth_probability
+        ]
+        for row in capsule_rows
+    ]
+    return write_csv(path, header, rows)
+end
+
+function write_runtime_summary_csv(path, runtime_rows)
+    header = [
+        "model", "label", "n_runs", "elapsed_s_mean",
+        "elapsed_s_std", "elapsed_s_min", "elapsed_s_max"
+    ]
+    rows = [
+        [
+            row.model, row.label, row.n_runs, row.elapsed_s_mean,
+            row.elapsed_s_std, row.elapsed_s_min, row.elapsed_s_max
+        ]
+        for row in runtime_rows
+    ]
+    return write_csv(path, header, rows)
+end
+
 function write_metadata_csv(path, config, collision_time, ground_truth_mass, elapsed_s, n_workers)
     rows = [
         ["created_at", string(now())],
@@ -475,6 +660,12 @@ function write_metadata_csv(path, config, collision_time, ground_truth_mass, ela
         ["rejuv_moves", config.rejuv_moves],
         ["drift_std", config.drift_std],
         ["proposal_drift_std", config.proposal_drift_std],
+        ["msc_birth_distance_scale", config.msc_params.birth_distance_scale],
+        ["msc_survival_distance_scale", config.msc_params.survival_distance_scale],
+        ["msc_min_active_steps", config.msc_params.min_active_steps],
+        ["msc_min_age_survival", config.msc_params.min_age_survival],
+        ["msc_age_decay_steps", config.msc_params.age_decay_steps],
+        ["msc_no_birth_weight", config.msc_params.no_birth_weight],
         ["time_bin_size", config.time_bin_size],
         ["seed", config.seed],
         ["scene_seed", config.scene_seed],
@@ -542,6 +733,62 @@ function plot_summary(summary_rows, config, collision_time, ground_truth_mass, p
     return p, png_path, pdf_path
 end
 
+function plot_capsule_summary(capsule_rows, config, collision_time, path_prefix)
+    items = NamedTuple[]
+    for model in unique([row.model for row in capsule_rows])
+        rows = sort(filter(row -> row.model == model, capsule_rows); by=row -> row.t)
+        history = [
+            (
+                t = row.t,
+                capsule_active_prob = row.capsule_active_prob,
+                capsule_switch_prob = row.capsule_switch_prob,
+                capsule_birth_prob = row.capsule_birth_prob,
+                capsule_death_prob = row.capsule_death_prob
+            )
+            for row in rows
+        ]
+        push!(items, (
+            label = rows[1].label,
+            history = history,
+            collision_time = collision_time
+        ))
+    end
+
+    p = plot_capsule_activation_history(
+        items;
+        collision_time = collision_time,
+        title = "Average MSC capsule activation over $(config.runs) inference repeats"
+    )
+
+    png_path = path_prefix * ".png"
+    pdf_path = path_prefix * ".pdf"
+    Plots.savefig(p, png_path)
+    Plots.savefig(p, pdf_path)
+    return p, png_path, pdf_path
+end
+
+function plot_runtime_summary(runtime_rows, path_prefix)
+    labels = [row.label for row in runtime_rows]
+    means = [row.elapsed_s_mean for row in runtime_rows]
+    stds = [row.elapsed_s_std for row in runtime_rows]
+
+    p = Plots.bar(
+        labels,
+        means;
+        yerror = stds,
+        xlabel = "model",
+        ylabel = "elapsed time per run (s)",
+        title = "Inference runtime over repeated runs",
+        legend = false
+    )
+
+    png_path = path_prefix * ".png"
+    pdf_path = path_prefix * ".pdf"
+    Plots.savefig(p, png_path)
+    Plots.savefig(p, pdf_path)
+    return p, png_path, pdf_path
+end
+
 function main(args)
     config = build_config(parse_cli(args))
     config.runs >= 1 || error("--runs must be at least 1.")
@@ -566,11 +813,23 @@ function main(args)
     tasks = build_tasks(config, observed_positions)
     task_results = pmap(_galileo_run_mass_task, tasks)
     summary_rows = summarize_results(task_results)
+    capsule_rows = summarize_capsule_results(task_results)
+    runtime_rows = summarize_runtime_results(task_results)
 
     replicates_path = write_replicates_csv(joinpath(config.out_dir, "replicates.csv"), task_results)
     summary_path = write_summary_csv(joinpath(config.out_dir, "summary.csv"), summary_rows)
+    runtime_summary_path = write_runtime_summary_csv(joinpath(config.out_dir, "runtime_summary.csv"), runtime_rows)
     positions_path = write_observed_positions_csv(joinpath(config.out_dir, "observed_positions.csv"), observed_positions)
     _, png_path, pdf_path = plot_summary(summary_rows, config, collision_time, ground_truth_mass, joinpath(config.out_dir, "average_mass_ratio_history"))
+    _, runtime_png_path, runtime_pdf_path = plot_runtime_summary(runtime_rows, joinpath(config.out_dir, "runtime_by_model"))
+
+    capsule_summary_path = nothing
+    capsule_png_path = nothing
+    capsule_pdf_path = nothing
+    if !isempty(capsule_rows)
+        capsule_summary_path = write_capsule_summary_csv(joinpath(config.out_dir, "capsule_summary.csv"), capsule_rows)
+        _, capsule_png_path, capsule_pdf_path = plot_capsule_summary(capsule_rows, config, collision_time, joinpath(config.out_dir, "average_capsule_activation_history"))
+    end
 
     elapsed_s = time() - started
     metadata_path = write_metadata_csv(joinpath(config.out_dir, "metadata.csv"), config, collision_time, ground_truth_mass, elapsed_s, n_workers)
@@ -579,10 +838,18 @@ function main(args)
     println("Wrote:")
     println("  $summary_path")
     println("  $replicates_path")
+    println("  $runtime_summary_path")
     println("  $metadata_path")
     println("  $positions_path")
     println("  $png_path")
     println("  $pdf_path")
+    println("  $runtime_png_path")
+    println("  $runtime_pdf_path")
+    if capsule_summary_path !== nothing
+        println("  $capsule_summary_path")
+        println("  $capsule_png_path")
+        println("  $capsule_pdf_path")
+    end
 end
 
 main(ARGS)

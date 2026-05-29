@@ -3,37 +3,33 @@
 ################################################################################
 
 Base.@kwdef struct MSCParams
-    birth_base::Float64 = 0.005                 # starting prob for capsule birth
-    birth_max::Float64 = 0.65                   # maximum prob to add to base if objects will collide
     birth_distance_scale::Float64 = 0.55        # controls how capsule prob scaled with object distance
-    approach_speed_scale::Float64 = 0.25        # controls how capsule prob scales if objects are approaching each other
-    cooldown_steps::Int = 2                     # "death" cooldown
-    cooldown_birth_scale::Float64 = 0.2         # scales (reduces) prob of rebirth after death
-    survival_base::Float64 = 0.2                # baseline prob a capsule survives
-    survival_near_boost::Float64 = 0.75         # boost survival prob is objects are close by
     survival_distance_scale::Float64 = 0.45     # scale for near collision
-    min_active_steps::Int = 3                   # minimum steps for capsule to be active
-    min_age_survival::Float64 = 0.95            # min survival prob early on
-    age_decay_steps::Float64 = 8.0              # gradual decay of survival
+    min_active_steps::Int = 4                   # minimum steps for capsule to be active
+    min_age_survival::Float64 = 1               # min survival prob early on
+    age_decay_steps::Float64 = 5.0              # gradual decay of survival
+    no_birth_weight::Float64 = 0.3              # weight of having no capsule births
 end
 
-# This is the abstract type for a capsule. 
+const DEFAULT_MSC_PARAMS = MSCParams()
+
+# This is the abstract type for a capsule.
 abstract type MSC end
 
-# This struct is common to all capsules, basic diagnostic / functional stats
+# This struct is some diagnostic / functional stats for the entire state
 struct MSCEventStats
-    birth_prob::Float64
-    survival_prob::Float64
-    switch_prob::Float64
-    start_t::Int                # when the capsule started (for plotting)
-    age::Int                    # how long the capsule has persisted
+    n_active::Int
+    n_persisted::Int
+    n_died::Int
+    birth_prob::Float64           # Birth prob of the new capsule; in case of no birth – total prob of any birth
+    born::Bool
 end
 
 # This is a capsule kind - collision of two objects (by ID)
 struct CollisionMSC <: MSC
     a::Int
     b::Int
-    age::Int              
+    age::Int
 end
 
 # This is a capsule kind - sliding of one object (by ID) (just an example for now)
@@ -49,7 +45,7 @@ struct MSCState
     objects::BulletState
     # Vector of all active capsules in the scene
     capsules::Vector{MSC}
-    # Statistics for diagnostoc / plotting reasons 
+    # Statistics for diagnostoc / plotting reasons
     event_stats::MSCEventStats
 end
 
@@ -67,9 +63,19 @@ end
 
 #### Helpers to manage capsules ####
 
+# Initializer
+function default_msc_event_stats()
+    return MSCEventStats(0, 0, 0, 0.0, false)
+end
+
+# Initializer
+function initial_msc_state(objects::BulletState, params::MSCParams=MSCParams())
+    return MSCState(objects, MSC[], default_msc_event_stats())
+end
+
 # Helper to calculate collision birth and death probability
 function collision_helper(objects::BulletState, a::Int, b::Int, params::MSCParams)
-    # Extract kinematic properties from the bullet state 
+    # Extract kinematic properties from the bullet state
     ka = objects.kinematics[a]
     kb = objects.kinematics[b]
 
@@ -83,7 +89,6 @@ function collision_helper(objects::BulletState, a::Int, b::Int, params::MSCParam
 
     return (
         distance = distance,
-        closing_speed = closing_speed,
         close_score = close_score,
         near_score = near_score
     )
@@ -95,17 +100,17 @@ function is_same_collision(cap::MSC, a::Int, b::Int)
            ((cap.a == a && cap.b == b) || (cap.a == b && cap.b == a))
 end
 
-# Helper to check if a collision capsule is already in the given vector 
+# Helper to check if a collision capsule is already in the given vector
 function has_active_collision(capsules::Vector{MSC}, a::Int, b::Int)
     return any(cap -> is_same_collision(cap, a, b), capsules)
 end
 
-# Helper to increase the age of a capsule 
+# Helper to increase the age of a capsule
 function increment_age(cap::CollisionMSC)
     return CollisionMSC(cap.a, cap.b, cap.age + 1)
 end
 
-# Get all possible capsules that can be activated at a given time
+# Helper to get all possible capsules that can be activated at a given time
 function enumerate_collision_birth_candidates(st::MSCState, active_capsules::Vector{MSC}, params::MSCParams)
     candidates = NamedTuple[]
 
@@ -113,7 +118,7 @@ function enumerate_collision_birth_candidates(st::MSCState, active_capsules::Vec
 
     for a in 1:(n_objects - 1)
         for b in (a + 1):n_objects
-            # Check if this capsule is already active 
+            # Check if this capsule is already active
             if has_active_collision(active_capsules, a, b)
                 continue
             end
@@ -138,73 +143,26 @@ function enumerate_collision_birth_candidates(st::MSCState, active_capsules::Vec
     return candidates
 end
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-const msc_positions = Gen.Map(observe)
-const DEFAULT_MSC_PARAMS = MSCParams()
-
-function default_msc_capsule(params::MSCParams=DEFAULT_MSC_PARAMS)
-    return CollisionMSC(1, 2, false, params.cooldown_steps, MSCEventStats(0.0, 0.0, 0.0))
-end
-
-function initial_msc_state(objects::AbstractVector{<:BulletElement}, params::MSCParams=DEFAULT_MSC_PARAMS)
-    return MSCState(objects, [default_msc_capsule(params)])
-end
-
+# Helper to clamp probability for numerical stability
 function _clamp_probability(p::Real)
     return clamp(Float64(p), 1e-4, 1.0 - 1e-4)
 end
 
-function _collision_features(objects::BulletState, a::Int, b::Int, params::MSCParams)
-    ka = objects.kinematics[a]
-    kb = objects.kinematics[b]
-    offset = kb.position .- ka.position
-    distance = norm(offset)
-    direction = distance > 1e-8 ? offset ./ distance : zero(offset)
-    relative_velocity = ka.linear_vel .- kb.linear_vel
-    closing_speed = dot(relative_velocity, direction)
+# Helper to calculate the survival probability for a collision capsule
+function collision_survival_probability(st::MSCState, cap::CollisionMSC, params::MSCParams)
+    # Get the collision features
+    features = collision_helper(st.objects, cap.a, cap.b, params)
 
-    close_score = exp(-((distance / params.birth_distance_scale)^2))
-    near_score = exp(-((distance / params.survival_distance_scale)^2))
-    approach_score = 1.0 / (1.0 + exp(-closing_speed / params.approach_speed_scale))
-
-    return (
-        distance = distance,
-        closing_speed = closing_speed,
-        close_score = close_score,
-        near_score = near_score,
-        approach_score = approach_score
-    )
-end
-
-function collision_birth_probability(prev::MSCState, params::MSCParams)
-    cap = prev.capsule
-    features = _collision_features(prev.objects, cap.a, cap.b, params)
-    cooldown_scale = cap.age < params.cooldown_steps ? params.cooldown_birth_scale : 1.0
-    approach_weight = 0.35 + 0.65 * features.approach_score
-    p = params.birth_base + params.birth_max * features.close_score * approach_weight
-    return _clamp_probability(cooldown_scale * p)
-end
-
-function collision_survival_probability(prev::MSCState, params::MSCParams)
-    cap = prev.capsule
-    features = _collision_features(prev.objects, cap.a, cap.b, params)
+    # Check if capsule is alive longer than threshold
     age_excess = max(cap.age - params.min_active_steps, 0)
-    age_penalty = exp(-age_excess / params.age_decay_steps)
-    p = (params.survival_base + params.survival_near_boost * features.near_score) * age_penalty
 
+    # Calculate an exponential age penalty
+    age_penalty = exp(-age_excess / params.age_decay_steps)
+
+    # Survival prob is e^(-distance/scale)*e^(-age_excess/scale)
+    p = features.near_score * age_penalty
+
+    # If the capsule is below the min active steps, let it survive with prob 1
     if cap.age < params.min_active_steps
         p = max(p, params.min_age_survival)
     end
@@ -212,43 +170,142 @@ function collision_survival_probability(prev::MSCState, params::MSCParams)
     return _clamp_probability(p)
 end
 
-@gen function collision_capsule_step(prev::MSCState, params::MSCParams)
-    cap = prev.capsule
+#### GENERATIVE FUNCTIONS ####
 
-    if cap.active
-        survival_prob = collision_survival_probability(prev, params)
-        survived ~ bernoulli(survival_prob)
-        active = Bool(survived)
-        next_age = active ? cap.age + 1 : 0
-        next_capsule = CollisionMSC(cap.a, cap.b, active, next_age)
-        stats = MSCEventStats(0.0, survival_prob, 1.0 - survival_prob)
-    else
-        birth_prob = collision_birth_probability(prev, params)
-        born ~ bernoulli(birth_prob)
-        active = Bool(born)
-        next_age = active ? 1 : cap.age + 1
-        next_capsule = CollisionMSC(cap.a, cap.b, active, next_age)
-        stats = MSCEventStats(birth_prob, 0.0, birth_prob)
+# A generative function to track all persisting capsules
+@gen function capsule_persistence(prev::MSCState, params::MSCParams)
+    # Track all capsules that survive
+    persisted = MSC[]
+
+    # Track the number of capsules that died
+    n_died = 0
+
+    # Loop over all capsules in the previous state
+    for (i, cap) in enumerate(prev.capsules)
+        if cap isa CollisionMSC
+            # Calculate survival probability
+            p_survive = collision_survival_probability(prev, cap, params)
+
+            # Sample whether this capsule survives with bernoulli
+            survived = {:survived => i} ~ bernoulli(p_survive)
+
+            # If it survived, increment age. Else, kill.
+            if Bool(survived)
+                push!(persisted, increment_age(cap))
+            else
+                n_died += 1
+            end
+        else
+            # Placeholder until others are made
+            error("Unknown capsule type: $(typeof(cap))")
+        end
     end
 
-    return (capsule = next_capsule, stats = stats)
+    return (
+        capsules = persisted,
+        n_died = n_died
+    )
 end
 
+# A generative function to sample new capsules (at most one)
+@gen function sample_new_capsule(prev::MSCState, persisted_capsules::Vector{MSC}, params::MSCParams)
+
+    # Get all possible collision candidates for this scene
+    candidates = enumerate_collision_birth_candidates(prev, persisted_capsules, params)
+
+    # Case: no possible new capsule.
+    if isempty(candidates)
+        return (
+            born = false,
+            capsule = nothing,
+            birth_prob = 0.0
+        )
+    end
+
+    # Add an option for no births
+    weights = [params.no_birth_weight; [c.weight for c in candidates]]
+    probs = weights ./ sum(weights)
+
+    choice ~ categorical(probs)
+
+    # choice == 1 means no birth.
+    if choice == 1
+        return (
+            born = false,
+            capsule = nothing,
+            birth_prob = 1.0 - probs[1]
+        )
+    end
+
+    candidate = candidates[choice - 1]
+
+    new_capsule = CollisionMSC(candidate.a, candidate.b, 1)
+
+    return (
+        born = true,
+        capsule = new_capsule,
+        birth_prob = probs[choice]
+    )
+end
+
+# A generative function to combine capsule birth, persistence, and death
+@gen function capsule_kernel(prev::MSCState, params::MSCParams)
+    persisted_result ~ capsule_persistence(prev, params)
+
+    birth_result ~ sample_new_capsule(prev, persisted_result.capsules, params)
+
+    capsules = copy(persisted_result.capsules)
+
+    if birth_result.born
+        push!(capsules, birth_result.capsule)
+    end
+
+    stats = MSCEventStats(
+        length(capsules),
+        length(persisted_result.capsules),
+        persisted_result.n_died,
+        birth_result.birth_prob,
+        birth_result.born
+    )
+
+    return (
+        capsules = capsules,
+        stats = stats
+    )
+end
+
+# A generative function that does the capsule step and physics update (normal for now)
 @gen function msc_physics_step(t::Int, prev::MSCState, sim::BulletSim, params::MSCParams)
-    capsule_update ~ collision_capsule_step(prev, params)
-    next_objects = PhySMC.step(sim, prev.objects)
-    positions ~ msc_positions(next_objects.kinematics)
 
-    return MSCState(next_objects, capsule_update.capsule, capsule_update.stats)
+    capsule_update ~ capsule_kernel(prev, params)
+
+    # For now: capsules only track event structure.
+    # Later: active capsules will produce diffs before this step.
+    next_objects = PhySMC.step(sim, prev.objects)
+
+    positions ~ Gen.Map(observe)(next_objects.kinematics)
+
+    return MSCState(
+        next_objects,
+        capsule_update.capsules,
+        capsule_update.stats
+    )
 end
 
-const msc_chain = Gen.Unfold(msc_physics_step)
-
+# Complete MSC model code
 @gen function msc_model(T::Int, sim::BulletSim, template::BulletState, params::MSCParams)
+    # Sample latents from the prior
     latents ~ prior(template.latents)
+
+    # Set a template for initial scene
     init_objects = Accessors.setproperties(template; latents=latents)
+
+    # Initial state
     init_state = initial_msc_state(init_objects, params)
-    states ~ msc_chain(T, init_state, sim, params)
+
+    # Final physics and likelihood
+    states ~ Gen.Unfold(msc_physics_step)(T, init_state, sim, params)
+
     return states
 end
 
@@ -259,7 +316,7 @@ end
 @gen function msc_proposal(tr::Gen.Trace)
     choices = get_choices(tr)
     prev_mass = choices[:latents => :obj1 => :mass]
-    mass = {:latents => :obj1 => :mass} ~ trunc_norm(prev_mass, 1.5, 0.0, Inf)
+    mass = {:latents => :obj1 => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
     return mass
 end
 
@@ -288,33 +345,39 @@ function msc_inference_procedure(gm_args::Tuple,
     return Gen.sample_unweighted_traces(state, particles)
 end
 
-function extract_msc_capsule(tr::Gen.Trace, t::Int)
-    return get_retval(tr)[t].capsule
+function extract_msc_capsules(tr::Gen.Trace, t::Int)
+    return get_retval(tr)[t].capsules
 end
 
 function extract_msc_event_stats(tr::Gen.Trace, t::Int)
     return get_retval(tr)[t].event_stats
 end
 
-function summarize_msc_capsules(traces, t::Int)
-    capsules = [extract_msc_capsule(tr, t) for tr in traces]
-    event_stats = [extract_msc_event_stats(tr, t) for tr in traces]
-    prev_active = t == 1 ? falses(length(traces)) : [extract_msc_capsule(tr, t - 1).active for tr in traces]
-    active = [cap.active for cap in capsules]
+function _mean_active_capsule_age(capsules::Vector{MSC})
+    isempty(capsules) && return 0.0
+    return mean(Float64[cap.age for cap in capsules])
+end
 
-    birth_events = [!prev_active[i] && active[i] for i in eachindex(active)]
-    death_events = [prev_active[i] && !active[i] for i in eachindex(active)]
-    switch_events = [prev_active[i] != active[i] for i in eachindex(active)]
+function summarize_msc_capsules(traces, t::Int)
+    capsules_by_trace = [extract_msc_capsules(tr, t) for tr in traces]
+    event_stats = [extract_msc_event_stats(tr, t) for tr in traces]
+    active_counts = [length(capsules) for capsules in capsules_by_trace]
+    active = active_counts .> 0
+
+    birth_events = [stats.born for stats in event_stats]
+    death_counts = [stats.n_died for stats in event_stats]
+    death_events = death_counts .> 0
+    switch_events = birth_events .| death_events
 
     return (
         capsule_active_prob = mean(Float64.(active)),
         capsule_switch_prob = mean(Float64.(switch_events)),
         capsule_birth_prob = mean(Float64.(birth_events)),
         capsule_death_prob = mean(Float64.(death_events)),
-        capsule_mean_age = mean(Float64[cap.age for cap in capsules]),
-        capsule_mean_birth_probability = mean(Float64[stats.birth_prob for stats in event_stats]),
-        capsule_mean_survival_probability = mean(Float64[stats.survival_prob for stats in event_stats]),
-        capsule_mean_switch_probability = mean(Float64[stats.switch_prob for stats in event_stats])
+        capsule_mean_active_count = mean(Float64.(active_counts)),
+        capsule_mean_death_count = mean(Float64.(death_counts)),
+        capsule_mean_age = mean(Float64[_mean_active_capsule_age(capsules) for capsules in capsules_by_trace]),
+        capsule_mean_birth_probability = mean(Float64[stats.birth_prob for stats in event_stats])
     )
 end
 
@@ -353,10 +416,10 @@ function msc_inference_with_history(gm_args::Tuple,
             capsule_switch_prob = capsule_summary.capsule_switch_prob,
             capsule_birth_prob = capsule_summary.capsule_birth_prob,
             capsule_death_prob = capsule_summary.capsule_death_prob,
+            capsule_mean_active_count = capsule_summary.capsule_mean_active_count,
+            capsule_mean_death_count = capsule_summary.capsule_mean_death_count,
             capsule_mean_age = capsule_summary.capsule_mean_age,
             capsule_mean_birth_probability = capsule_summary.capsule_mean_birth_probability,
-            capsule_mean_survival_probability = capsule_summary.capsule_mean_survival_probability,
-            capsule_mean_switch_probability = capsule_summary.capsule_mean_switch_probability,
             traces = current_traces
         )
     end

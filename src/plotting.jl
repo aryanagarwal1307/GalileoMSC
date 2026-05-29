@@ -447,6 +447,67 @@ function _is_history_vector(x)
     return x isa AbstractVector && !isempty(x) && hasproperty(x[1], :t)
 end
 
+function _msc_capsule_key(cap::CollisionMSC)
+    a = min(cap.a, cap.b)
+    b = max(cap.a, cap.b)
+    return (:collision, a, b)
+end
+
+function _msc_capsule_label(key)
+    kind, a, b = key
+    if kind == :collision
+        return "collision $a-$b"
+    end
+    return string(kind, " ", a, "-", b)
+end
+
+function _msc_capsule_activity_matrix(history)
+    ts = [h.t for h in history]
+    keys = Tuple{Symbol,Int,Int}[]
+    seen = Set{Tuple{Symbol,Int,Int}}()
+
+    for h in history
+        for tr in h.traces
+            for cap in extract_msc_capsules(tr, Int(h.t))
+                key = _msc_capsule_key(cap)
+                if !(key in seen)
+                    push!(seen, key)
+                    push!(keys, key)
+                end
+            end
+        end
+    end
+
+    activity = zeros(length(keys), length(history))
+    index = Dict{Tuple{Symbol,Int,Int},Int}()
+    for (i, key) in enumerate(keys)
+        index[key] = i
+    end
+
+    for (col, h) in enumerate(history)
+        n_traces = length(h.traces)
+        n_traces == 0 && continue
+
+        for tr in h.traces
+            active_keys = Set{Tuple{Symbol,Int,Int}}()
+            for cap in extract_msc_capsules(tr, Int(h.t))
+                push!(active_keys, _msc_capsule_key(cap))
+            end
+            for key in active_keys
+                activity[index[key], col] += 1.0
+            end
+        end
+
+        activity[:, col] ./= n_traces
+    end
+
+    return (
+        ts = ts,
+        labels = [_msc_capsule_label(key) for key in keys],
+        activity = activity
+    )
+end
+
 function _bin_mass_history(history, time_bin_size::Int)
     time_bin_size >= 1 || error("time_bin_size must be at least 1.")
     time_bin_size == 1 && return history
@@ -578,6 +639,7 @@ end
 function plot_capsule_activation_history(history_results;
                                          collision_time=nothing,
                                          show_switch::Bool=true,
+                                         show_events::Bool=true,
                                          title::AbstractString="MSC capsule activation over time")
     items = if hasproperty(history_results, :results)
         history_results.results
@@ -618,6 +680,22 @@ function plot_capsule_activation_history(history_results;
                         lw=2,
                         ls=:dash)
         end
+
+        if show_events && hasproperty(history[1], :capsule_birth_prob)
+            birth_probs = [h.capsule_birth_prob for h in history]
+            Plots.plot!(p, ts, birth_probs;
+                        label="$(label) birth",
+                        lw=2,
+                        ls=:dot)
+        end
+
+        if show_events && hasproperty(history[1], :capsule_death_prob)
+            death_probs = [h.capsule_death_prob for h in history]
+            Plots.plot!(p, ts, death_probs;
+                        label="$(label) death",
+                        lw=2,
+                        ls=:dashdot)
+        end
     end
 
     plotted_any || error("No history entries with capsule_active_prob were found.")
@@ -633,4 +711,65 @@ function plot_capsule_activation_history(history_results;
     end
 
     return p
+end
+
+function plot_capsule_flame_graph(history_results;
+                                  collision_time=nothing,
+                                  title::AbstractString="MSC capsule flame graph")
+    items = if hasproperty(history_results, :results)
+        history_results.results
+    elseif _is_history_vector(history_results)
+        [(label = "MSC v0", history = history_results, collision_time = collision_time)]
+    else
+        history_results
+    end
+    items = items isa AbstractVector ? items : [items]
+
+    plot_list = []
+
+    for (idx, item) in enumerate(items)
+        history = _history_value(item)
+        isempty(history) && continue
+        hasproperty(history[1], :capsule_active_prob) || continue
+        hasproperty(history[1], :traces) || continue
+
+        label = _history_label(item, idx)
+        data = _msc_capsule_activity_matrix(history)
+        item_title = length(items) == 1 ? title : "$title: $label"
+
+        if isempty(data.labels)
+            p = Plots.plot(data.ts, zeros(length(data.ts));
+                           xlabel="time",
+                           ylabel="capsule",
+                           title=item_title,
+                           legend=false,
+                           ylims=(0, 1),
+                           color=:white)
+            if !isempty(data.ts)
+                Plots.annotate!(p, mean(data.ts), 0.5, "no sampled active capsules")
+            end
+        else
+            ys = collect(1:length(data.labels))
+            p = Plots.heatmap(data.ts, ys, data.activity;
+                              xlabel="time",
+                              ylabel="capsule",
+                              yticks=(ys, data.labels),
+                              title=item_title,
+                              color=:viridis,
+                              clims=(0, 1),
+                              colorbar_title="active probability",
+                              legend=false)
+        end
+
+        item_collision_time = collision_time !== nothing ? collision_time : _history_collision_time(item)
+        if item_collision_time !== nothing
+            Plots.vline!(p, [item_collision_time]; label="", lw=2, ls=:dot, color=:white)
+        end
+
+        push!(plot_list, p)
+    end
+
+    isempty(plot_list) && error("No MSC history entries with traces were found.")
+    length(plot_list) == 1 && return plot_list[1]
+    return Plots.plot(plot_list...; layout=(length(plot_list), 1), size=(900, 260 * length(plot_list)))
 end
