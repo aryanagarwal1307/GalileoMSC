@@ -3,10 +3,23 @@
 ################################################################################
 
 Base.@kwdef struct MSCParams
+    # Epsilon for numerical stability
+    eps::Float64 = 1e-9
+
+    # Collision Birth Features: 
+    birth_gap_max::Float64 = 0.10               # Maximum gap for which objects are 'close'
+    birth_gap_scale::Float64 = 0.025            # Gap gate parameter 
+    birth_v_min::Float64 = 0.02                 # Minimum closing speech for which objects are 'appraching'
+    birth_v_scale::Float64 = 0.02               # Closing speed gate parameter 
+    birth_T_contact::Float64 = 0.25             # Contact prediction horizon
+    birth_tau_scale::Float64 = 0.05             # Time to contact gate parameter
+    birth_base::Float64 = 0.99                  # Base probability of collision when all predicates are satisfied
+
+    # Others? 
     birth_distance_scale::Float64 = 0.55        # controls how capsule prob scaled with object distance
     survival_distance_scale::Float64 = 0.45     # scale for near collision
     min_active_steps::Int = 4                   # minimum steps for capsule to be active
-    min_age_survival::Float64 = 1               # min survival prob early on
+    min_age_survival::Float64 = 1.0             # min survival prob early on
     age_decay_steps::Float64 = 5.0              # gradual decay of survival
     no_birth_weight::Float64 = 0.3              # weight of having no capsule births
 end
@@ -79,17 +92,64 @@ function collision_helper(objects::BulletState, a::Int, b::Int, params::MSCParam
     ka = objects.kinematics[a]
     kb = objects.kinematics[b]
 
-    # Distance in 2D 
-    offset = kb.position .- ka.position
+    xa = Vector{Float64}(ka.position)
+    xb = Vector{Float64}(kb.position)
+
+    va = Vector{Float64}(ka.linear_vel)
+    vb = Vector{Float64}(kb.linear_vel)
+
+    # Relative distance and velocity in 2D 
+    offset = xb .- xa
     distance = norm(offset)
 
-    # Calculate a distance based weight for bernoulli birth / death
-    close_score = exp(-((distance / params.birth_distance_scale)^2))
-    near_score = exp(-((distance / params.survival_distance_scale)^2))
+    rhat = offset ./ max(distance, params.eps)
+
+    rel_vel = vb .- va
+
+    # Positive means the surface gap is shrinking.
+    v_closing = -dot(rel_vel, rhat)
+
+    # Surface Gap
+    R_sum = 0                   #TODO fix this calculation 
+    gap = distance - R_sum
+
+    # Constant velocity time to contact 
+    if gap > 0.0 && v_closing > v_min
+        tau = gap / v_closing
+    else
+        tau = NaN               # If the objects are not separated & approaching, tau is meaningless 
+    end
+
+    # Sigmoidal scores 
+    sigmoid(z) = 1 / (1 + exp(-z))
+
+    p_gap = sigmoid((params.birth_gap_max - gap) / params.birth_gap_scale)
+    p_closing = sigmoid((v_closing - params.birth_v_min) / params.birth_v_scale)
+
+    if isnan(tau)
+        p_ttc = 0.0
+    else
+        p_ttc = sigmoid((params.birth_T_contact - tau) / params.birth_tau_scale)
+    end
+
+    # Final collision birth probability for this pair.
+    birth_prob = params.birth_base * p_gap * p_closing * p_ttc
+
+    # Survival probability 
+    near_gap = max(gap, 0.0)
+    near_score = exp(-((near_gap / params.survival_distance_scale)^2))
 
     return (
         distance = distance,
-        close_score = close_score,
+        gap = gap,
+        v_closing = v_closing,
+        tau = tau,
+
+        p_gap = p_gap,
+        p_closing = p_closing,
+        p_ttc = p_ttc,
+
+        birth_prob = birth_prob,
         near_score = near_score
     )
 end
