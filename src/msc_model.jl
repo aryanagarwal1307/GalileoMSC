@@ -14,13 +14,20 @@ Base.@kwdef struct MSCParams
     birth_T_contact::Float64 = 0.25             # Contact prediction horizon
     birth_tau_scale::Float64 = 0.05             # Time to contact gate parameter
     birth_base::Float64 = 0.99                  # Base probability of collision when all predicates are satisfied
+    birth_aabb_window::Float64 = 1.0            # AABB distance window for full birth predicate evaluation
+    birth_background_weight::Float64 = 1e-8     # Uniform candidate weight outside the AABB window
 
-    # Others? 
-    birth_distance_scale::Float64 = 0.55        # controls how capsule prob scaled with object distance
-    survival_distance_scale::Float64 = 0.45     # scale for near collision
-    min_active_steps::Int = 4                   # minimum steps for capsule to be active
+    # Object dimensions 
+    obj_dims  = [[0.15, 0.3, 0.075], [0.2,  0.2, 0.1]] # ramp, then table 
+
+    # Collision Death Features 
+    min_active_steps::Int = 5                   # minimum steps for capsule to be active
     min_age_survival::Float64 = 1.0             # min survival prob early on
     age_decay_steps::Float64 = 5.0              # gradual decay of survival
+    survival_distance_scale::Float64 = 0.45     # scale for near collision
+    death_v_min::Float64 = 0.02                 # velocity parameter 
+    death_v_scale::Float64 = 0.02               # Velocity parameter
+
     no_birth_weight::Float64 = 0.3              # weight of having no capsule births
 end
 
@@ -109,12 +116,15 @@ function collision_helper(objects::BulletState, a::Int, b::Int, params::MSCParam
     # Positive means the surface gap is shrinking.
     v_closing = -dot(rel_vel, rhat)
 
-    # Surface Gap
-    R_sum = 0                   #TODO fix this calculation 
+    # Surface Gap using bounding-sphere radii.
+    R_ramp  = norm(params.obj_dims[a]) / 2
+    R_table = norm(params.obj_dims[b]) / 2
+    R_sum = R_ramp + R_table
+
     gap = distance - R_sum
 
     # Constant velocity time to contact 
-    if gap > 0.0 && v_closing > v_min
+    if gap > 0.0 && v_closing > params.birth_v_min
         tau = gap / v_closing
     else
         tau = NaN               # If the objects are not separated & approaching, tau is meaningless 
@@ -170,7 +180,21 @@ function increment_age(cap::CollisionMSC)
     return CollisionMSC(cap.a, cap.b, cap.age + 1)
 end
 
-# Helper to get all possible capsules that can be activated at a given time
+# Calculate a quick bounding box distance between objects 
+function bounding_box_distance(aabb_a, aabb_b)
+    a_min, a_max = aabb_a
+    b_min, b_max = aabb_b
+    sep_sq = 0.0
+
+    for i in 1:3
+        sep = max(a_min[i] - b_max[i], b_min[i] - a_max[i], 0.0)
+        sep_sq += sep^2
+    end
+
+    return sqrt(sep_sq)
+end
+
+# Helper to get all possible capsules that can be activated at a given timem #TODO: Make this sparse! 
 function enumerate_collision_birth_candidates(st::MSCState, active_capsules::Vector{MSC}, params::MSCParams)
     candidates = NamedTuple[]
 
@@ -182,19 +206,23 @@ function enumerate_collision_birth_candidates(st::MSCState, active_capsules::Vec
             if has_active_collision(active_capsules, a, b)
                 continue
             end
-
-            # get the distance features 
-            features = collision_helper(st.objects, a, b, params)
-
-            # Closer objects get larger birth weight.
-            weight = features.close_score
-            weight = max(weight, 1e-8)
+            
+            # Check if it satsfies the minimum bounding box distance 
+            aabb_distance = bounding_box_distance(st.objects.kinematics[a].aabb, st.objects.kinematics[b].aabb)
+            if aabb_distance <= params.birth_aabb_window
+                features = collision_helper(st.objects, a, b, params)
+                distance = features.distance
+                weight = features.birth_prob
+            else
+                distance = aabb_distance
+                weight = params.birth_background_weight
+            end
 
             push!(candidates, (
                 kind = :collision,
                 a = a,
                 b = b,
-                distance = features.distance,
+                distance = distance,
                 weight = weight
             ))
         end
@@ -213,26 +241,34 @@ function collision_survival_probability(st::MSCState, cap::CollisionMSC, params:
     # Get the collision features
     features = collision_helper(st.objects, cap.a, cap.b, params)
 
-    # Check if capsule is alive longer than threshold
-    age_excess = max(cap.age - params.min_active_steps, 0)
-
-    # Calculate an exponential age penalty
-    age_penalty = exp(-age_excess / params.age_decay_steps)
-
-    # Survival prob is e^(-distance/scale)*e^(-age_excess/scale)
-    p = features.near_score * age_penalty
-
-    # If the capsule is below the min active steps, let it survive with prob 1
-    if cap.age < params.min_active_steps
-        p = max(p, params.min_age_survival)
+    # Check if the minimum number of steps has passed yet 
+    if cap.age <= params.min_active_steps
+        return params.min_age_survival
     end
 
-    return _clamp_probability(p)
+    ## Time of Life Component ## 
+    age_excess = max(cap.age - params.min_active_steps, 0)
+    age_penalty = exp(-age_excess / params.age_decay_steps)
+
+    ## Distance Component ##
+    # near_gap = max(features.gap, 0.0)
+    # near_score = exp(-((near_gap / params.survival_distance_scale)^2))
+
+    ## Velocity Component 
+    # v_separating = -features.v_closing
+    # sigmoid(z) = 1 / (1 + exp(-z))
+    # p_separating = sigmoid((v_separating - params.death_v_min) / params.death_v_scale)
+    # velocity_survival = 1.0 - p_separating
+
+    # Survival prob is e^(-distance/scale)*e^((-age_excess/scale)^2)*(1 - sigmoid((-closing_speed - min_v)/v_scale))
+    p = age_penalty # * near_score * velocity_survival
+
+    return p
 end
 
 #### GENERATIVE FUNCTIONS ####
 
-# A generative function to track all persisting capsules
+# A generative function to track all persisting capsules #TODO: Fix this categorical distribution 
 @gen function capsule_persistence(prev::MSCState, params::MSCParams)
     # Track all capsules that survive
     persisted = MSC[]
