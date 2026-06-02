@@ -39,12 +39,15 @@ function usage()
       --rejuv-moves N            Rejuvenation moves per step [1]
       --drift-std X              Drift model mass transition std [1.5]
       --proposal-drift-std X     Drift model mass MH proposal std [0.25]
-      --msc-birth-distance-scale X [0.55]
-      --msc-survival-distance-scale X [0.45]
-      --msc-min-active-steps N    [4]
-      --msc-min-age-survival X    [1.0]
-      --msc-age-decay-steps X     [5.0]
-      --msc-no-birth-weight X     [0.3]
+      --msc-birth-aabb-window X  Override MSCParams.birth_aabb_window
+      --msc-birth-background-weight X Override MSCParams.birth_background_weight
+      --msc-survival-distance-scale X Override MSCParams.survival_distance_scale
+      --msc-min-active-steps N    Override MSCParams.min_active_steps
+      --msc-min-age-survival X    Override MSCParams.min_age_survival
+      --msc-age-decay-steps X     Override MSCParams.age_decay_steps
+      --msc-death-v-min X         Override MSCParams.death_v_min
+      --msc-death-v-scale X       Override MSCParams.death_v_scale
+      --msc-no-birth-weight X     Override MSCParams.no_birth_weight
       --time-bin-size N          Plot bin width in time steps [10]
       --seed N                   Base inference seed [11]
       --scene-seed N             Seed for the shared observed scene [11]
@@ -58,6 +61,18 @@ function usage()
     """
 end
 
+const MSC_OPTION_KEYS = Set([
+    "msc_birth_aabb_window",
+    "msc_birth_background_weight",
+    "msc_survival_distance_scale",
+    "msc_min_active_steps",
+    "msc_min_age_survival",
+    "msc_age_decay_steps",
+    "msc_death_v_min",
+    "msc_death_v_scale",
+    "msc_no_birth_weight"
+])
+
 function parse_cli(args)
     opts = Dict{String,String}(
         "out_dir" => DEFAULT_OUT_DIR,
@@ -69,12 +84,6 @@ function parse_cli(args)
         "rejuv_moves" => "1",
         "drift_std" => "1.5",
         "proposal_drift_std" => "0.25",
-        "msc_birth_distance_scale" => "0.55",
-        "msc_survival_distance_scale" => "0.45",
-        "msc_min_active_steps" => "4",
-        "msc_min_age_survival" => "1.0",
-        "msc_age_decay_steps" => "5.0",
-        "msc_no_birth_weight" => "0.3",
         "time_bin_size" => "10",
         "seed" => "11",
         "scene_seed" => "11",
@@ -102,7 +111,11 @@ function parse_cli(args)
                 i += 1
                 value = args[i]
             end
-            opts[replace(key, "-" => "_")] = value
+            normalized_key = replace(key, "-" => "_")
+            if !haskey(opts, normalized_key) && !(normalized_key in MSC_OPTION_KEYS)
+                error("Unknown option --$key")
+            end
+            opts[normalized_key] = value
         else
             error("Unexpected positional argument: $arg")
         end
@@ -128,6 +141,31 @@ function parse_models(raw::AbstractString)
     return models
 end
 
+function build_msc_params(opts)
+    kwargs = Pair{Symbol,Any}[]
+
+    haskey(opts, "msc_birth_aabb_window") &&
+        push!(kwargs, :birth_aabb_window => parse(Float64, opts["msc_birth_aabb_window"]))
+    haskey(opts, "msc_birth_background_weight") &&
+        push!(kwargs, :birth_background_weight => parse(Float64, opts["msc_birth_background_weight"]))
+    haskey(opts, "msc_survival_distance_scale") &&
+        push!(kwargs, :survival_distance_scale => parse(Float64, opts["msc_survival_distance_scale"]))
+    haskey(opts, "msc_min_active_steps") &&
+        push!(kwargs, :min_active_steps => parse(Int, opts["msc_min_active_steps"]))
+    haskey(opts, "msc_min_age_survival") &&
+        push!(kwargs, :min_age_survival => parse(Float64, opts["msc_min_age_survival"]))
+    haskey(opts, "msc_age_decay_steps") &&
+        push!(kwargs, :age_decay_steps => parse(Float64, opts["msc_age_decay_steps"]))
+    haskey(opts, "msc_death_v_min") &&
+        push!(kwargs, :death_v_min => parse(Float64, opts["msc_death_v_min"]))
+    haskey(opts, "msc_death_v_scale") &&
+        push!(kwargs, :death_v_scale => parse(Float64, opts["msc_death_v_scale"]))
+    haskey(opts, "msc_no_birth_weight") &&
+        push!(kwargs, :no_birth_weight => parse(Float64, opts["msc_no_birth_weight"]))
+
+    return MSCParams(; kwargs...)
+end
+
 function build_config(opts)
     return (
         out_dir = abspath(opts["out_dir"]),
@@ -139,14 +177,7 @@ function build_config(opts)
         rejuv_moves = parse(Int, opts["rejuv_moves"]),
         drift_std = parse(Float64, opts["drift_std"]),
         proposal_drift_std = parse(Float64, opts["proposal_drift_std"]),
-        msc_params = MSCParams(
-            birth_distance_scale = parse(Float64, opts["msc_birth_distance_scale"]),
-            survival_distance_scale = parse(Float64, opts["msc_survival_distance_scale"]),
-            min_active_steps = parse(Int, opts["msc_min_active_steps"]),
-            min_age_survival = parse(Float64, opts["msc_min_age_survival"]),
-            age_decay_steps = parse(Float64, opts["msc_age_decay_steps"]),
-            no_birth_weight = parse(Float64, opts["msc_no_birth_weight"])
-        ),
+        msc_params = build_msc_params(opts),
         time_bin_size = parse(Int, opts["time_bin_size"]),
         seed = parse(Int, opts["seed"]),
         scene_seed = parse(Int, opts["scene_seed"]),
@@ -660,11 +691,14 @@ function write_metadata_csv(path, config, collision_time, ground_truth_mass, ela
         ["rejuv_moves", config.rejuv_moves],
         ["drift_std", config.drift_std],
         ["proposal_drift_std", config.proposal_drift_std],
-        ["msc_birth_distance_scale", config.msc_params.birth_distance_scale],
+        ["msc_birth_aabb_window", config.msc_params.birth_aabb_window],
+        ["msc_birth_background_weight", config.msc_params.birth_background_weight],
         ["msc_survival_distance_scale", config.msc_params.survival_distance_scale],
         ["msc_min_active_steps", config.msc_params.min_active_steps],
         ["msc_min_age_survival", config.msc_params.min_age_survival],
         ["msc_age_decay_steps", config.msc_params.age_decay_steps],
+        ["msc_death_v_min", config.msc_params.death_v_min],
+        ["msc_death_v_scale", config.msc_params.death_v_scale],
         ["msc_no_birth_weight", config.msc_params.no_birth_weight],
         ["time_bin_size", config.time_bin_size],
         ["seed", config.seed],
