@@ -291,6 +291,104 @@ function _galileo_history_row(h)
     return row
 end
 
+function _galileo_capsule_key_label(cap)
+    if cap isa GalileoMSC.CollisionMSC
+        a = min(cap.a, cap.b)
+        b = max(cap.a, cap.b)
+        return (
+            key = "collision:$a:$b",
+            label = "collision $a-$b"
+        )
+    end
+
+    kind = string(nameof(typeof(cap)))
+    parts = String[]
+    for name in fieldnames(typeof(cap))
+        name == :age && continue
+        push!(parts, string(name, "=", getfield(cap, name)))
+    end
+
+    if isempty(parts)
+        return (key = kind, label = kind)
+    end
+
+    return (
+        key = string(kind, ":", join(parts, ":")),
+        label = string(kind, " ", join(parts, ", "))
+    )
+end
+
+function _galileo_flame_graph_rows(history)
+    if isempty(history) ||
+       !hasproperty(history[1], :capsule_active_prob) ||
+       !hasproperty(history[1], :traces)
+        return NamedTuple[]
+    end
+
+    keys = String[]
+    labels = Dict{String,String}()
+    seen = Set{String}()
+
+    for h in history
+        for tr in h.traces
+            for cap in GalileoMSC.extract_msc_capsules(tr, Int(h.t))
+                item = _galileo_capsule_key_label(cap)
+                if !(item.key in seen)
+                    push!(seen, item.key)
+                    push!(keys, item.key)
+                    labels[item.key] = item.label
+                end
+            end
+        end
+    end
+
+    rows = NamedTuple[]
+    if isempty(keys)
+        for h in history
+            push!(rows, (
+                t = Int(h.t),
+                capsule_index = missing,
+                capsule_key = missing,
+                capsule_label = missing,
+                active_probability = missing,
+                n_traces = length(h.traces)
+            ))
+        end
+        return rows
+    end
+
+    for h in history
+        n_traces = length(h.traces)
+        active_counts = Dict(key => 0 for key in keys)
+
+        for tr in h.traces
+            active_keys = Set{String}()
+            for cap in GalileoMSC.extract_msc_capsules(tr, Int(h.t))
+                push!(active_keys, _galileo_capsule_key_label(cap).key)
+            end
+
+            for key in active_keys
+                if haskey(active_counts, key)
+                    active_counts[key] += 1
+                end
+            end
+        end
+
+        for (idx, key) in enumerate(keys)
+            push!(rows, (
+                t = Int(h.t),
+                capsule_index = idx,
+                capsule_key = key,
+                capsule_label = labels[key],
+                active_probability = n_traces == 0 ? missing : active_counts[key] / n_traces,
+                n_traces = n_traces
+            ))
+        end
+    end
+
+    return rows
+end
+
 function _galileo_run_mass_task(task)
     Random.seed!(task.seed)
     scene = _galileo_make_scene(task)
@@ -314,6 +412,7 @@ function _galileo_run_mass_task(task)
     )
 
     model_result = result.results[1]
+    flame_graph = _galileo_flame_graph_rows(model_result.history)
     history = [_galileo_history_row(h) for h in model_result.history]
 
     elapsed_s = time() - started
@@ -325,7 +424,8 @@ function _galileo_run_mass_task(task)
         run = task.run,
         seed = task.seed,
         elapsed_s = elapsed_s,
-        history = history
+        history = history,
+        flame_graph = flame_graph
     )
 end
 
@@ -382,6 +482,104 @@ function setup_workers()
                 return row
             end
 
+            function _galileo_capsule_key_label(cap)
+                if cap isa GalileoMSC.CollisionMSC
+                    a = min(cap.a, cap.b)
+                    b = max(cap.a, cap.b)
+                    return (
+                        key = "collision:$a:$b",
+                        label = "collision $a-$b"
+                    )
+                end
+
+                kind = string(nameof(typeof(cap)))
+                parts = String[]
+                for name in fieldnames(typeof(cap))
+                    name == :age && continue
+                    push!(parts, string(name, "=", getfield(cap, name)))
+                end
+
+                if isempty(parts)
+                    return (key = kind, label = kind)
+                end
+
+                return (
+                    key = string(kind, ":", join(parts, ":")),
+                    label = string(kind, " ", join(parts, ", "))
+                )
+            end
+
+            function _galileo_flame_graph_rows(history)
+                if isempty(history) ||
+                   !hasproperty(history[1], :capsule_active_prob) ||
+                   !hasproperty(history[1], :traces)
+                    return NamedTuple[]
+                end
+
+                keys = String[]
+                labels = Dict{String,String}()
+                seen = Set{String}()
+
+                for h in history
+                    for tr in h.traces
+                        for cap in GalileoMSC.extract_msc_capsules(tr, Int(h.t))
+                            item = _galileo_capsule_key_label(cap)
+                            if !(item.key in seen)
+                                push!(seen, item.key)
+                                push!(keys, item.key)
+                                labels[item.key] = item.label
+                            end
+                        end
+                    end
+                end
+
+                rows = NamedTuple[]
+                if isempty(keys)
+                    for h in history
+                        push!(rows, (
+                            t = Int(h.t),
+                            capsule_index = missing,
+                            capsule_key = missing,
+                            capsule_label = missing,
+                            active_probability = missing,
+                            n_traces = length(h.traces)
+                        ))
+                    end
+                    return rows
+                end
+
+                for h in history
+                    n_traces = length(h.traces)
+                    active_counts = Dict(key => 0 for key in keys)
+
+                    for tr in h.traces
+                        active_keys = Set{String}()
+                        for cap in GalileoMSC.extract_msc_capsules(tr, Int(h.t))
+                            push!(active_keys, _galileo_capsule_key_label(cap).key)
+                        end
+
+                        for key in active_keys
+                            if haskey(active_counts, key)
+                                active_counts[key] += 1
+                            end
+                        end
+                    end
+
+                    for (idx, key) in enumerate(keys)
+                        push!(rows, (
+                            t = Int(h.t),
+                            capsule_index = idx,
+                            capsule_key = key,
+                            capsule_label = labels[key],
+                            active_probability = n_traces == 0 ? missing : active_counts[key] / n_traces,
+                            n_traces = n_traces
+                        ))
+                    end
+                end
+
+                return rows
+            end
+
             function _galileo_run_mass_task(task)
                 Random.seed!(task.seed)
                 scene = _galileo_make_scene(task)
@@ -405,6 +603,7 @@ function setup_workers()
                 )
 
                 model_result = result.results[1]
+                flame_graph = _galileo_flame_graph_rows(model_result.history)
                 history = [_galileo_history_row(h) for h in model_result.history]
 
                 elapsed_s = time() - started
@@ -416,7 +615,8 @@ function setup_workers()
                     run = task.run,
                     seed = task.seed,
                     elapsed_s = elapsed_s,
-                    history = history
+                    history = history,
+                    flame_graph = flame_graph
                 )
             end
         end)
@@ -618,6 +818,35 @@ function write_replicates_csv(path, task_results)
             ])
         end
     end
+    return write_csv(path, header, rows)
+end
+
+function write_flame_graph_csv(path, task_results, collision_time)
+    header = [
+        "model", "label", "run", "seed", "t",
+        "capsule_index", "capsule_key", "capsule_label",
+        "active_probability", "n_traces", "collision_time"
+    ]
+
+    rows = Vector{Vector{Any}}()
+    for result in sort(task_results; by=r -> (string(r.model), r.run))
+        for flame_row in result.flame_graph
+            push!(rows, [
+                result.model,
+                result.label,
+                result.run,
+                result.seed,
+                flame_row.t,
+                flame_row.capsule_index,
+                flame_row.capsule_key,
+                flame_row.capsule_label,
+                flame_row.active_probability,
+                flame_row.n_traces,
+                collision_time
+            ])
+        end
+    end
+
     return write_csv(path, header, rows)
 end
 
@@ -851,6 +1080,7 @@ function main(args)
     runtime_rows = summarize_runtime_results(task_results)
 
     replicates_path = write_replicates_csv(joinpath(config.out_dir, "replicates.csv"), task_results)
+    flame_graph_path = write_flame_graph_csv(joinpath(config.out_dir, "flame_graph.csv"), task_results, collision_time)
     summary_path = write_summary_csv(joinpath(config.out_dir, "summary.csv"), summary_rows)
     runtime_summary_path = write_runtime_summary_csv(joinpath(config.out_dir, "runtime_summary.csv"), runtime_rows)
     positions_path = write_observed_positions_csv(joinpath(config.out_dir, "observed_positions.csv"), observed_positions)
@@ -872,6 +1102,7 @@ function main(args)
     println("Wrote:")
     println("  $summary_path")
     println("  $replicates_path")
+    println("  $flame_graph_path")
     println("  $runtime_summary_path")
     println("  $metadata_path")
     println("  $positions_path")

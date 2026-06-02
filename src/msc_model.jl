@@ -7,12 +7,12 @@ Base.@kwdef struct MSCParams
     eps::Float64 = 1e-9
 
     # Collision Birth Features: 
-    birth_gap_max::Float64 = 0.10               # Maximum gap for which objects are 'close'
-    birth_gap_scale::Float64 = 0.025            # Gap gate parameter 
+    birth_gap_max::Float64 = 0.05               # Maximum gap for which objects are 'close'
+    birth_gap_scale::Float64 = 0.02             # Gap gate parameter 
     birth_v_min::Float64 = 0.02                 # Minimum closing speech for which objects are 'appraching'
     birth_v_scale::Float64 = 0.02               # Closing speed gate parameter 
-    birth_T_contact::Float64 = 0.25             # Contact prediction horizon
-    birth_tau_scale::Float64 = 0.05             # Time to contact gate parameter
+    birth_T_contact::Float64 = 0.01             # Contact prediction horizon
+    birth_tau_scale::Float64 = 0.04             # Time to contact gate parameter
     birth_base::Float64 = 0.99                  # Base probability of collision when all predicates are satisfied
     birth_aabb_window::Float64 = 1.0            # AABB distance window for full birth predicate evaluation
     birth_background_weight::Float64 = 1e-8     # Uniform candidate weight outside the AABB window
@@ -23,7 +23,7 @@ Base.@kwdef struct MSCParams
     # Collision Death Features 
     min_active_steps::Int = 5                   # minimum steps for capsule to be active
     min_age_survival::Float64 = 1.0             # min survival prob early on
-    age_decay_steps::Float64 = 5.0              # gradual decay of survival
+    age_decay_steps::Float64 = 9.0              # gradual decay of survival
     survival_distance_scale::Float64 = 0.45     # scale for near collision
     death_v_min::Float64 = 0.02                 # velocity parameter 
     death_v_scale::Float64 = 0.02               # Velocity parameter
