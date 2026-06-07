@@ -29,9 +29,13 @@ Base.@kwdef struct MSCParams
     death_v_scale::Float64 = 0.02               # Velocity parameter
 
     no_birth_weight::Float64 = 0.3              # weight of having no capsule births
+    collision_mass_drift_std::Float64 = 1.5     # std for active-collision mass drift
+    tracked_mass_object::Int = 1                # object to summarize in mass history
 end
 
 const DEFAULT_MSC_PARAMS = MSCParams()
+
+const MSC_PHYSICS_BRANCHES = Dict(:no_capsule => 1, :collision => 2)
 
 # This is the abstract type for a capsule.
 abstract type MSC end
@@ -434,14 +438,64 @@ end
     )
 end
 
-# A generative function that does the capsule step and physics update (normal for now)
+# Detect the first collision capsule.
+function first_collision_capsule(capsules::Vector{MSC})
+    @inbounds for cap in capsules
+        cap isa CollisionMSC && return cap
+    end
+    return nothing
+end
+
+# Pick a branch to switch to.
+function msc_physics_branch(capsules::Vector{MSC})
+    return first_collision_capsule(capsules) === nothing ? :no_capsule : :collision
+end
+
+# When there's no collision capsule, just update physics normally. No sampling.
+@gen function msc_no_capsule_clause(prev_objects::BulletState, sim::BulletSim, capsules::Vector{MSC}, params::MSCParams)
+    return PhySMC.step(sim, prev_objects)
+end
+
+# A function that drifts the mass latent 
+@gen function msc_collision_mass_drift(ls::RigidBodyLatents, params::MSCParams)
+    prev_mass = ls.data.mass
+    mass ~ trunc_norm(prev_mass, params.collision_mass_drift_std, 0.0, Inf)
+    return update_latents(ls, mass)
+end
+
+# Active collision capsules drift object a's mass before stepping physics.
+@gen function msc_collision_clause(prev_objects::BulletState, sim::BulletSim, capsules::Vector{MSC}, params::MSCParams)
+    cap = first_collision_capsule(capsules)
+    cap === nothing && error("collision clause selected without an active collision capsule")
+    collision = cap::CollisionMSC
+
+    obj_a = {:obj => collision.a} ~ msc_collision_mass_drift(prev_objects.latents[collision.a], params)
+    obj_b = update_latents(prev_objects.latents[collision.b], 1.0)
+
+    # Keep untouched object latents persistent while the active collision drifts mass.
+    new_latents = Vector{BulletElemLatents}(undef, length(prev_objects.latents))
+    copyto!(new_latents, prev_objects.latents)
+    new_latents[collision.a] = obj_a
+    new_latents[collision.b] = obj_b
+
+    updated_objects = Accessors.setproperties(prev_objects; latents=new_latents)
+    return PhySMC.step(sim, updated_objects)
+end
+
+# Switch combinator for clauses 
+const msc_physics_clause = Gen.Switch(
+    MSC_PHYSICS_BRANCHES,
+    msc_no_capsule_clause,
+    msc_collision_clause
+)
+
+# A generative function that does the capsule step and physics update.
 @gen function msc_physics_step(t::Int, prev::MSCState, sim::BulletSim, params::MSCParams)
 
     capsule_update ~ capsule_kernel(prev, params)
 
-    # For now: capsules only track event structure.
-    # Later: active capsules will produce diffs before this step.
-    next_objects = PhySMC.step(sim, prev.objects)
+    branch = msc_physics_branch(capsule_update.capsules)
+    next_objects ~ msc_physics_clause(branch, prev.objects, sim, capsule_update.capsules, params)
 
     positions ~ Gen.Map(observe)(next_objects.kinematics)
 
@@ -513,6 +567,24 @@ function extract_msc_event_stats(tr::Gen.Trace, t::Int)
     return get_retval(tr)[t].event_stats
 end
 
+function extract_current_msc_mass(tr::Gen.Trace, t::Int, params::MSCParams=DEFAULT_MSC_PARAMS)
+    object_id = params.tracked_mass_object
+    return Float64(get_retval(tr)[t].objects.latents[object_id].data.mass)
+end
+
+function summarize_msc_masses(traces, t::Int, params::MSCParams=DEFAULT_MSC_PARAMS)
+    ms = Float64[extract_current_msc_mass(tr, t, params) for tr in traces]
+    return (
+        mean = mean(ms),
+        std = std(ms),
+        q25 = quantile(ms, 0.25),
+        q75 = quantile(ms, 0.75),
+        q05 = quantile(ms, 0.05),
+        q95 = quantile(ms, 0.95),
+        masses = ms
+    )
+end
+
 function _mean_active_capsule_age(capsules::Vector{MSC})
     isempty(capsules) && return 0.0
     return mean(Float64[cap.age for cap in capsules])
@@ -547,6 +619,7 @@ function msc_inference_with_history(gm_args::Tuple,
                                     rejuv_moves::Int=1)
 
     get_args(t) = (t, gm_args[2:4]...)
+    params = gm_args[4]::MSCParams
     state = Gen.initialize_particle_filter(msc_model, get_args(0), EmptyChoiceMap(), particles)
     argdiffs = (UnknownChange(), NoChange(), NoChange(), NoChange())
 
@@ -561,7 +634,7 @@ function msc_inference_with_history(gm_args::Tuple,
         end
 
         current_traces = Gen.sample_unweighted_traces(state, particles)
-        mass_summary = summarize_trace_set(current_traces)
+        mass_summary = summarize_msc_masses(current_traces, t, params)
         capsule_summary = summarize_msc_capsules(current_traces, t)
 
         history[t] = (
