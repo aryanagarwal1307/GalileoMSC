@@ -13,11 +13,11 @@ struct UnsafeFastCategorical <: Gen.Distribution{Int} end
 const unsafe_fast_categorical = UnsafeFastCategorical()
 
 struct SparseCategoricalWeights{I<:AbstractVector{Int}, W<:AbstractVector{Float64}} <: AbstractVector{Float64}
-    n_choices::Int
-    explicit_indices::I
-    explicit_weights::W
-    first_weight::Float64
-    default_weight::Float64
+    n_choices::Int              # total number of logical choices 
+    explicit_indices::I         # indices with custom weight 
+    explicit_weights::W         # actual weight for those indices 
+    first_weight::Float64       # no birth weight 
+    default_weight::Float64     # weight for "unlikely" events 
 end
 
 Base.size(weights::SparseCategoricalWeights) = (weights.n_choices,)

@@ -199,15 +199,7 @@ end
 
 # Sparse normalized birth weights. Choice index 1 is reserved for no_birth;
 # choices 2:end map deterministically to inactive collision pairs.
-@inline function collision_birth_candidate_count(weights::SparseCategoricalWeights)
-    return weights.n_choices - 1
-end
-
-@inline function _birth_default_weight(params::MSCParams)
-    return max(Float64(params.birth_background_weight), Float64(params.eps))
-end
-
-function _collision_birth_weight(st::MSCState, a::Int, b::Int, params::MSCParams, default_weight::Float64)
+function collision_birth_weight(st::MSCState, a::Int, b::Int, params::MSCParams, default_weight::Float64)
     aabb_distance = bounding_box_distance(st.objects.kinematics[a].aabb, st.objects.kinematics[b].aabb)
     if aabb_distance <= params.birth_aabb_window
         features = collision_helper(st.objects, a, b, params)
@@ -217,9 +209,10 @@ function _collision_birth_weight(st::MSCState, a::Int, b::Int, params::MSCParams
     return default_weight
 end
 
-function collision_birth_weights(st::MSCState, active_capsules::Vector{MSC}, params::MSCParams)
+# Get weights for all collision pairs. Inefficient (2 passes) but highly memory efficient – has sparse arrays. 
+function all_collision_birth_weights(st::MSCState, active_capsules::Vector{MSC}, params::MSCParams)
     n_objects = length(st.objects.kinematics)
-    default_weight = _birth_default_weight(params)
+    default_weight = params.birth_background_weight
     total_weight = Float64(params.no_birth_weight)
     n_candidates = 0
     n_explicit = 0
@@ -231,7 +224,7 @@ function collision_birth_weights(st::MSCState, active_capsules::Vector{MSC}, par
             n_candidates += 1
             total_weight += default_weight
 
-            weight = _collision_birth_weight(st, a, b, params, default_weight)
+            weight = collision_birth_weight(st, a, b, params, default_weight)
             if weight > default_weight
                 n_explicit += 1
                 total_weight += weight - default_weight
@@ -257,7 +250,7 @@ function collision_birth_weights(st::MSCState, active_capsules::Vector{MSC}, par
                 has_active_collision(active_capsules, a, b) && continue
 
                 candidate_index += 1
-                weight = _collision_birth_weight(st, a, b, params, default_weight)
+                weight = collision_birth_weight(st, a, b, params, default_weight)
                 if weight > default_weight
                     explicit_index += 1
                     @inbounds begin
@@ -377,10 +370,10 @@ end
 @gen function sample_new_capsule(prev::MSCState, persisted_capsules::Vector{MSC}, params::MSCParams)
 
     # Build sparse normalized weights over no_birth and inactive collision pairs.
-    weights = collision_birth_weights(prev, persisted_capsules, params)
+    weights = all_collision_birth_weights(prev, persisted_capsules, params)
 
     # Case: no possible new capsule.
-    if collision_birth_candidate_count(weights) == 0
+    if weights.n_choices - 1 == 0
         return (
             born = false,
             capsule = nothing,
