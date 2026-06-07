@@ -99,22 +99,22 @@ function collision_helper(objects::BulletState, a::Int, b::Int, params::MSCParam
     ka = objects.kinematics[a]
     kb = objects.kinematics[b]
 
-    xa = Vector{Float64}(ka.position)
-    xb = Vector{Float64}(kb.position)
+    @inbounds begin
+        dx = kb.position[1] - ka.position[1]
+        dy = kb.position[2] - ka.position[2]
+        dz = kb.position[3] - ka.position[3]
 
-    va = Vector{Float64}(ka.linear_vel)
-    vb = Vector{Float64}(kb.linear_vel)
+        dvx = kb.linear_vel[1] - ka.linear_vel[1]
+        dvy = kb.linear_vel[2] - ka.linear_vel[2]
+        dvz = kb.linear_vel[3] - ka.linear_vel[3]
+    end
 
-    # Relative distance and velocity in 2D 
-    offset = xb .- xa
-    distance = norm(offset)
-
-    rhat = offset ./ max(distance, params.eps)
-
-    rel_vel = vb .- va
+    # Relative distance and velocity in 3D.
+    distance = sqrt(dx^2 + dy^2 + dz^2)
+    inv_distance = 1.0 / max(distance, params.eps)
 
     # Positive means the surface gap is shrinking.
-    v_closing = -dot(rel_vel, rhat)
+    v_closing = -(dvx * dx + dvy * dy + dvz * dz) * inv_distance
 
     # Surface Gap using bounding-sphere radii.
     R_ramp  = norm(params.obj_dims[a]) / 2
@@ -172,7 +172,10 @@ end
 
 # Helper to check if a collision capsule is already in the given vector
 function has_active_collision(capsules::Vector{MSC}, a::Int, b::Int)
-    return any(cap -> is_same_collision(cap, a, b), capsules)
+    @inbounds for i in eachindex(capsules)
+        is_same_collision(capsules[i], a, b) && return true
+    end
+    return false
 end
 
 # Helper to increase the age of a capsule
@@ -186,7 +189,7 @@ function bounding_box_distance(aabb_a, aabb_b)
     b_min, b_max = aabb_b
     sep_sq = 0.0
 
-    for i in 1:3
+    @inbounds for i in 1:3
         sep = max(a_min[i] - b_max[i], b_min[i] - a_max[i], 0.0)
         sep_sq += sep^2
     end
@@ -194,41 +197,103 @@ function bounding_box_distance(aabb_a, aabb_b)
     return sqrt(sep_sq)
 end
 
-# Helper to get all possible capsules that can be activated at a given timem #TODO: Make this sparse! 
-function enumerate_collision_birth_candidates(st::MSCState, active_capsules::Vector{MSC}, params::MSCParams)
-    candidates = NamedTuple[]
+# Sparse normalized birth weights. Choice index 1 is reserved for no_birth;
+# choices 2:end map deterministically to inactive collision pairs.
+@inline function collision_birth_candidate_count(weights::SparseCategoricalWeights)
+    return weights.n_choices - 1
+end
 
+@inline function _birth_default_weight(params::MSCParams)
+    return max(Float64(params.birth_background_weight), Float64(params.eps))
+end
+
+function _collision_birth_weight(st::MSCState, a::Int, b::Int, params::MSCParams, default_weight::Float64)
+    aabb_distance = bounding_box_distance(st.objects.kinematics[a].aabb, st.objects.kinematics[b].aabb)
+    if aabb_distance <= params.birth_aabb_window
+        features = collision_helper(st.objects, a, b, params)
+        return max(Float64(features.birth_prob), default_weight)
+    end
+
+    return default_weight
+end
+
+function collision_birth_weights(st::MSCState, active_capsules::Vector{MSC}, params::MSCParams)
     n_objects = length(st.objects.kinematics)
+    default_weight = _birth_default_weight(params)
+    total_weight = Float64(params.no_birth_weight)
+    n_candidates = 0
+    n_explicit = 0
 
     for a in 1:(n_objects - 1)
         for b in (a + 1):n_objects
-            # Check if this capsule is already active
-            if has_active_collision(active_capsules, a, b)
-                continue
-            end
-            
-            # Check if it satsfies the minimum bounding box distance 
-            aabb_distance = bounding_box_distance(st.objects.kinematics[a].aabb, st.objects.kinematics[b].aabb)
-            if aabb_distance <= params.birth_aabb_window
-                features = collision_helper(st.objects, a, b, params)
-                distance = features.distance
-                weight = features.birth_prob
-            else
-                distance = aabb_distance
-                weight = params.birth_background_weight
-            end
+            has_active_collision(active_capsules, a, b) && continue
 
-            push!(candidates, (
-                kind = :collision,
-                a = a,
-                b = b,
-                distance = distance,
-                weight = weight
-            ))
+            n_candidates += 1
+            total_weight += default_weight
+
+            weight = _collision_birth_weight(st, a, b, params, default_weight)
+            if weight > default_weight
+                n_explicit += 1
+                total_weight += weight - default_weight
+            end
         end
     end
 
-    return candidates
+    if total_weight <= 0.0
+        return SparseCategoricalWeights(n_candidates + 1, Int[], Float64[], 1.0, 0.0)
+    end
+
+    inv_total = 1.0 / total_weight
+
+    explicit_indices = Vector{Int}(undef, n_explicit)
+    explicit_weights = Vector{Float64}(undef, n_explicit)
+
+    if n_explicit > 0
+        candidate_index = 0
+        explicit_index = 0
+
+        for a in 1:(n_objects - 1)
+            for b in (a + 1):n_objects
+                has_active_collision(active_capsules, a, b) && continue
+
+                candidate_index += 1
+                weight = _collision_birth_weight(st, a, b, params, default_weight)
+                if weight > default_weight
+                    explicit_index += 1
+                    @inbounds begin
+                        explicit_indices[explicit_index] = candidate_index + 1
+                        explicit_weights[explicit_index] = weight * inv_total
+                    end
+                end
+            end
+        end
+    end
+
+    return SparseCategoricalWeights(
+        n_candidates + 1,
+        explicit_indices,
+        explicit_weights,
+        Float64(params.no_birth_weight) * inv_total,
+        default_weight * inv_total
+    )
+end
+
+function collision_birth_candidate_pair(st::MSCState, active_capsules::Vector{MSC}, candidate_index::Int)
+    n_objects = length(st.objects.kinematics)
+    seen = 0
+
+    for a in 1:(n_objects - 1)
+        for b in (a + 1):n_objects
+            has_active_collision(active_capsules, a, b) && continue
+
+            seen += 1
+            if seen == candidate_index
+                return a, b
+            end
+        end
+    end
+
+    error("Invalid collision birth candidate index: $candidate_index")
 end
 
 # Helper to clamp probability for numerical stability
@@ -271,13 +336,15 @@ end
 # A generative function to track all persisting capsules #TODO: Fix this categorical distribution 
 @gen function capsule_persistence(prev::MSCState, params::MSCParams)
     # Track all capsules that survive
-    persisted = MSC[]
+    persisted = Vector{MSC}(undef, length(prev.capsules))
+    n_persisted = 0
 
     # Track the number of capsules that died
     n_died = 0
 
     # Loop over all capsules in the previous state
-    for (i, cap) in enumerate(prev.capsules)
+    for i in eachindex(prev.capsules)
+        @inbounds cap = prev.capsules[i]
         if cap isa CollisionMSC
             # Calculate survival probability
             p_survive = collision_survival_probability(prev, cap, params)
@@ -287,7 +354,8 @@ end
 
             # If it survived, increment age. Else, kill.
             if Bool(survived)
-                push!(persisted, increment_age(cap))
+                n_persisted += 1
+                @inbounds persisted[n_persisted] = increment_age(cap)
             else
                 n_died += 1
             end
@@ -296,6 +364,8 @@ end
             error("Unknown capsule type: $(typeof(cap))")
         end
     end
+
+    resize!(persisted, n_persisted)
 
     return (
         capsules = persisted,
@@ -306,11 +376,11 @@ end
 # A generative function to sample new capsules (at most one)
 @gen function sample_new_capsule(prev::MSCState, persisted_capsules::Vector{MSC}, params::MSCParams)
 
-    # Get all possible collision candidates for this scene
-    candidates = enumerate_collision_birth_candidates(prev, persisted_capsules, params)
+    # Build sparse normalized weights over no_birth and inactive collision pairs.
+    weights = collision_birth_weights(prev, persisted_capsules, params)
 
     # Case: no possible new capsule.
-    if isempty(candidates)
+    if collision_birth_candidate_count(weights) == 0
         return (
             born = false,
             capsule = nothing,
@@ -318,29 +388,24 @@ end
         )
     end
 
-    # Add an option for no births
-    weights = [params.no_birth_weight; [c.weight for c in candidates]]
-    probs = weights ./ sum(weights)
-
-    choice ~ categorical(probs)
+    choice ~ unsafe_fast_categorical(weights)
 
     # choice == 1 means no birth.
     if choice == 1
         return (
             born = false,
             capsule = nothing,
-            birth_prob = 1.0 - probs[1]
+            birth_prob = 1.0 - weights[1]
         )
     end
 
-    candidate = candidates[choice - 1]
-
-    new_capsule = CollisionMSC(candidate.a, candidate.b, 1)
+    a, b = collision_birth_candidate_pair(prev, persisted_capsules, choice - 1)
+    new_capsule = CollisionMSC(a, b, 1)
 
     return (
         born = true,
         capsule = new_capsule,
-        birth_prob = probs[choice]
+        birth_prob = weights[choice]
     )
 end
 
@@ -350,15 +415,21 @@ end
 
     birth_result ~ sample_new_capsule(prev, persisted_result.capsules, params)
 
-    capsules = copy(persisted_result.capsules)
+    n_persisted = length(persisted_result.capsules)
+    n_active = n_persisted + (birth_result.born ? 1 : 0)
+    capsules = Vector{MSC}(undef, n_active)
+
+    @inbounds for i in 1:n_persisted
+        capsules[i] = persisted_result.capsules[i]
+    end
 
     if birth_result.born
-        push!(capsules, birth_result.capsule)
+        @inbounds capsules[n_active] = birth_result.capsule
     end
 
     stats = MSCEventStats(
-        length(capsules),
-        length(persisted_result.capsules),
+        n_active,
+        n_persisted,
         persisted_result.n_died,
         birth_result.birth_prob,
         birth_result.born

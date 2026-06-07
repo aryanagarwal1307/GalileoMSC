@@ -11,6 +11,7 @@ using PyCall
 using Random
 using Statistics
 
+include("distributions/unsafe_fast_categorical.jl")
 include("common.jl")
 include("scenes.jl")
 include("particle_filter_model.jl")
@@ -32,6 +33,7 @@ export
     detect_collision_time,
     gamma_from_mean_std,
     trunc_norm,
+    unsafe_fast_categorical,
     # scenes
     ramp,
     create_ramp_simulation,
