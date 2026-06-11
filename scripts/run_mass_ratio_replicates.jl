@@ -76,10 +76,10 @@ const MSC_OPTION_KEYS = Set([
 function parse_cli(args)
     opts = Dict{String,String}(
         "out_dir" => DEFAULT_OUT_DIR,
-        "runs" => "20",
+        "runs" => "1",
         "workers" => string(min(4, max(Sys.CPU_THREADS - 1, 1))),
-        "models" => "particle_filter,drift",
-        "T" => "120",
+        "models" => "msc",
+        "T" => "65",
         "particles" => "20",
         "rejuv_moves" => "1",
         "drift_std" => "1.5",
@@ -88,7 +88,7 @@ function parse_cli(args)
         "seed" => "11",
         "scene_seed" => "11",
         "scene_model" => "particle_filter",
-        "mass_ratio" => "2.0",
+        "mass_ratio" => "4.0",
         "obj_frictions" => "0.3,0.3",
         "obj_positions" => "0.5,1.5",
         "slope" => string(2 / 3),

@@ -2,8 +2,8 @@
 #SBATCH --job-name=mass-ratio-reps
 ##SBATCH --partition=day
 #SBATCH --time=04:00:00
-#SBATCH --mem=128G
-#SBATCH --cpus-per-task=21
+#SBATCH --mem=16G
+#SBATCH --cpus-per-task=2
 #SBATCH --output=/gpfs/radev/project/yildirim/aa2842/GalileoMSC/logs/mass_ratio_reps_%j.out
 
 set -euo pipefail
