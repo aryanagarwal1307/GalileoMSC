@@ -629,8 +629,12 @@ function msc_inference_with_history(gm_args::Tuple,
         Gen.particle_filter_step!(state, get_args(t), argdiffs, o)
         Gen.maybe_resample!(state, ess_threshold=particles / 2)
 
-        for i in 1:particles, s in 1:rejuv_moves
-            state.traces[i], _ = Gen.mh(state.traces[i], msc_proposal, ())
+        for i in 1:particles
+            for s in 1:rejuv_moves
+                state.traces[i], _ = Gen.mh(state.traces[i], msc_proposal, ())
+            end
+            capsules = get_retval(state.traces[i])[t].capsules
+            println("t=$(t), particle=$(i), capsules=$(capsules), log_score=$(Gen.get_score(state.traces[i]))")
         end
 
         current_traces = Gen.sample_unweighted_traces(state, particles)

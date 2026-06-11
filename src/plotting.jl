@@ -595,7 +595,7 @@ function plot_mass_ratio_history_comparison(history_results;
     p = Plots.plot(xlabel="time",
                    ylabel="mass ratio",
                    title=title,
-                   legend=:topright)
+                   legend=:topleft)
 
     for (idx, item) in enumerate(items)
         history = _bin_mass_history(_history_value(item), time_bin_size)
@@ -631,6 +631,73 @@ function plot_mass_ratio_history_comparison(history_results;
 
     if result_ground_truth_mass !== nothing
         Plots.hline!(p, [result_ground_truth_mass]; label="true mass ratio", lw=2, ls=:dot, color=:black)
+    end
+
+    return p
+end
+
+function _mass_variance_history(history, time_bin_size::Int)
+    time_bin_size >= 1 || error("time_bin_size must be at least 1.")
+    sorted_history = sort(collect(history); by=h -> h.t)
+    isempty(sorted_history) && return NamedTuple[]
+
+    if time_bin_size == 1
+        return [(t = h.t, variance = h.std^2) for h in sorted_history]
+    end
+
+    binned = NamedTuple[]
+    first_t = minimum([h.t for h in sorted_history])
+    last_t = maximum([h.t for h in sorted_history])
+
+    for bin_start in first_t:time_bin_size:last_t
+        bin_stop = bin_start + time_bin_size - 1
+        rows = [h for h in sorted_history if bin_start <= h.t <= bin_stop]
+        isempty(rows) && continue
+
+        push!(binned, (
+            t = mean([h.t for h in rows]),
+            variance = mean([h.std^2 for h in rows])
+        ))
+    end
+
+    return binned
+end
+
+function plot_mass_ratio_variance_comparison(history_results;
+                                             collision_time=nothing,
+                                             time_bin_size::Int=1,
+                                             title::AbstractString="Posterior mass-ratio variance over time")
+    time_bin_size >= 1 || error("time_bin_size must be at least 1.")
+
+    items = hasproperty(history_results, :results) ? history_results.results : history_results
+    items = items isa AbstractVector ? items : [items]
+
+    p = Plots.plot(xlabel="time",
+                   ylabel="posterior variance",
+                   title=title,
+                   legend=:topright)
+
+    for (idx, item) in enumerate(items)
+        variance_history = _mass_variance_history(_history_value(item), time_bin_size)
+        label = _history_label(item, idx)
+        ts = [h.t for h in variance_history]
+        variances = [h.variance for h in variance_history]
+
+        Plots.plot!(p, ts, variances;
+                    label=label,
+                    lw=3,
+                    marker=:circle,
+                    ms=3)
+    end
+
+    collision_times = if collision_time !== nothing
+        [collision_time]
+    else
+        unique([_history_collision_time(item) for item in items if _history_collision_time(item) !== nothing])
+    end
+
+    for (idx, ct) in enumerate(collision_times)
+        Plots.vline!(p, [ct], label=idx == 1 ? "collision time" : "", lw=2, ls=:dash)
     end
 
     return p

@@ -9,6 +9,7 @@ begin
     import Pkg
     Pkg.activate(joinpath(@__DIR__, ".."))
 
+    using Revise
     using GalileoMSC
     using Plots
     using Gen
@@ -20,7 +21,7 @@ begin
     T = 100
     particles = 20
     rejuv_moves = 1
-    true_mass_ratio = 4.0
+    true_mass_ratio = 1.5
     time_bin_size = 10
     rng_seed = 11
 end
@@ -31,6 +32,18 @@ scene = create_ramp_simulation(
     obj_frictions = (0.3, 0.3),
     obj_positions = (0.5, 1.5)
 );
+
+# ╔═╡ 4a1a9a03-6e00-4e8c-8d52-fd8277af218e
+begin
+    Revise.revise()
+
+    common_jl = joinpath(dirname(pathof(GalileoMSC)), "common.jl")
+    lines = readlines(common_jl)
+    prior_line = strip(lines[findfirst(line -> occursin("mass ~", line), lines)])
+
+    println("GalileoMSC loaded from: ", pathof(GalileoMSC))
+    println("Prior mass draw: ", prior_line)
+end
 
 # ╔═╡ b9a22540-5d70-47dd-8398-1c8878eef1fb
 mass_and_msc_cmp = run_mass_ratio_history_comparison(
@@ -124,13 +137,22 @@ plot_capsule_flame_graph(
     title = "MSC capsule flame graph"
 )
 
+# ╔═╡ 8678d0a3-f37e-4391-937e-058a3e794052
+plot_mass_ratio_variance_comparison(
+    mass_and_msc_cmp;
+    time_bin_size = time_bin_size,
+    title = "Particle filter vs MSC posterior variance"
+)
+
 # ╔═╡ Cell order:
 # ╠═9f5b47fc-1f86-4e7d-8fd0-1600866ef6d5
 # ╠═a62867f7-cad0-443b-9135-58cdd6561e06
 # ╠═109177a5-67d9-42b4-8db0-23c9c929894f
+# ╠═4a1a9a03-6e00-4e8c-8d52-fd8277af218e
 # ╠═b9a22540-5d70-47dd-8398-1c8878eef1fb
 # ╠═2f029d12-2c25-42ec-b089-db8a6733165c
 # ╠═091847d1-a86d-4664-9262-f85436e67886
 # ╠═b81746d1-128a-418d-826a-694d1e9d4cc9
 # ╠═74e366ec-8f05-4235-a4e7-b4e17725ee21
 # ╠═d5995f77-6cf6-4867-b21d-72febed2fb8e
+# ╠═8678d0a3-f37e-4391-937e-058a3e794052

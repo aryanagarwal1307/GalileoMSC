@@ -12,6 +12,8 @@ using Random
 using Statistics
 
 include("distributions/unsafe_fast_categorical.jl")
+include("distributions/log_uniform.jl")
+include("distributions/log_symmetric_peak.jl")
 include("common.jl")
 include("scenes.jl")
 include("particle_filter_model.jl")
@@ -80,6 +82,7 @@ export
     run_mass_ratio_history_comparison,
     plot_mass_ratio_history,
     plot_mass_ratio_history_comparison,
+    plot_mass_ratio_variance_comparison,
     plot_capsule_activation_history,
     plot_capsule_flame_graph,
     timing_spec,
