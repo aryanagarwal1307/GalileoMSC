@@ -19,8 +19,14 @@ end
 # Initial prior
 ################################################################################
 
+# The bounds are symmetric in log space, so 1.0 is the prior's center.
+const MASS_PRIOR_LOW = 0.25
+const MASS_PRIOR_CENTER = 1.0
+const MASS_PRIOR_HIGH = 4.0
+const MASS_PRIOR_LOG_STD = 0.5
+
 @gen function sample_object(ls::RigidBodyLatents)
-    mass ~ gamma(1.2, 10.0)
+    mass ~ log_symmetric_peak(MASS_PRIOR_LOW, MASS_PRIOR_HIGH, MASS_PRIOR_CENTER, MASS_PRIOR_LOG_STD)
     return update_latents(ls, mass)
 end
 
@@ -74,6 +80,7 @@ function template_mass_ratio(template::BulletState)
 end
 
 function mass_constraint(mass::Real)
+    isfinite(mass) || error("mass ratio must be finite")
     mass > 0 || error("mass ratio must be positive")
     constraints = Gen.choicemap()
     constraints[:latents => :obj1 => :mass] = Float64(mass)
