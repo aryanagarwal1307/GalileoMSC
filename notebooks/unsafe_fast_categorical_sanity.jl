@@ -55,7 +55,7 @@ begin
 
     params = MSCParams(no_birth_weight = 0.1, birth_background_weight = 1e-6)
     prev = initial_msc_state(scene.init_state, params)
-    birth_trace = Gen.simulate(GalileoMSC.sample_new_capsule, (prev, GalileoMSC.MSC[], params))
+    birth_trace = Gen.simulate(GalileoMSC.sample_new_capsule, (1, prev, GalileoMSC.MSC[], params))
     birth_result = Gen.get_retval(birth_trace)
     birth_choice = Gen.get_choices(birth_trace)[:choice]
     birth_sampling_sanity = birth_choice >= 1 && 0.0 <= birth_result.birth_prob <= 1.0

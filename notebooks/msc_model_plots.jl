@@ -18,10 +18,10 @@ end
 # ╔═╡ a62867f7-cad0-443b-9135-58cdd6561e06
 begin
     selected_models = [:particle_filter, :msc]
-    T = 100
+    T = 150
     particles = 20
     rejuv_moves = 1
-    true_mass_ratio = 1.5
+    true_mass_ratio = 1.6
     time_bin_size = 10
     rng_seed = 11
 end
