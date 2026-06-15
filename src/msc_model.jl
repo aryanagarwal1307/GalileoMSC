@@ -1,336 +1,10 @@
 ################################################################################
-# Minimal collision-capsule MSC model
+# MSC model
 ################################################################################
-
-Base.@kwdef struct MSCParams
-    # Epsilon for numerical stability
-    eps::Float64 = 1e-9
-
-    # Collision Birth Features: 
-    birth_gap_max::Float64 = 0.05               # Maximum gap for which objects are 'close'
-    birth_gap_scale::Float64 = 0.02             # Gap gate parameter 
-    birth_v_min::Float64 = 0.02                 # Minimum closing speech for which objects are 'appraching'
-    birth_v_scale::Float64 = 0.02               # Closing speed gate parameter 
-    birth_T_contact::Float64 = 0.01             # Contact prediction horizon
-    birth_tau_scale::Float64 = 0.04             # Time to contact gate parameter
-    birth_base::Float64 = 0.99                  # Base probability of collision when all predicates are satisfied
-    birth_aabb_window::Float64 = 1.0            # AABB distance window for full birth predicate evaluation
-    birth_background_weight::Float64 = 1e-8     # Uniform candidate weight outside the AABB window
-
-    # Object dimensions 
-    obj_dims  = [[0.15, 0.3, 0.075], [0.2,  0.2, 0.1]] # ramp, then table 
-
-    # Collision Death Features 
-    min_active_steps::Int = 5                   # minimum steps for capsule to be active
-    min_age_survival::Float64 = 1.0             # min survival prob early on
-    age_decay_steps::Float64 = 9.0              # gradual decay of survival
-    survival_distance_scale::Float64 = 0.45     # scale for near collision
-    death_v_min::Float64 = 0.02                 # velocity parameter 
-    death_v_scale::Float64 = 0.02               # Velocity parameter
-
-    no_birth_weight::Float64 = 0.3              # weight of having no capsule births
-    collision_mass_drift_std::Float64 = 1.5     # std for active-collision mass drift
-    tracked_mass_object::Int = 1                # object to summarize in mass history
-end
-
-const DEFAULT_MSC_PARAMS = MSCParams()
-
-const MSC_PHYSICS_BRANCHES = Dict(:no_capsule => 1, :collision => 2)
-
-# This is the abstract type for a capsule.
-abstract type MSC end
-
-# This struct is some diagnostic / functional stats for the entire state
-struct MSCEventStats
-    n_active::Int
-    n_persisted::Int
-    n_died::Int
-    birth_prob::Float64           # Birth prob of the new capsule; in case of no birth – total prob of any birth
-    born::Bool
-end
-
-# This is a capsule kind - collision of two objects (by ID)
-struct CollisionMSC <: MSC
-    a::Int
-    b::Int
-    age::Int
-end
-
-# This is a capsule kind - sliding of one object (by ID) (just an example for now)
-struct SlidingMSC <: MSC
-    a::Int
-    surface::Int
-    age::Int
-end
-
-# Here we track the state of the entire scene
-struct MSCState
-    # Vector of all (interacting) objects in the scene as a Bullet State
-    objects::BulletState
-    # Vector of all active capsules in the scene
-    capsules::Vector{MSC}
-    # Statistics for diagnostoc / plotting reasons
-    event_stats::MSCEventStats
-end
-
-# A diff structure for one object, all latents to be updated
-struct ObjectDiff
-    object_id::Int
-    changes::Dict{Symbol, Float64}
-end
-
-# A diff structure for all objects in a capsule, all latents to be updated
-struct CapsuleDiff
-    diffs::Vector{ObjectDiff}
-end
-
-
-#### Helpers to manage capsules ####
-
-# Initializer
-function default_msc_event_stats()
-    return MSCEventStats(0, 0, 0, 0.0, false)
-end
-
-# Initializer
-function initial_msc_state(objects::BulletState, params::MSCParams=MSCParams())
-    return MSCState(objects, MSC[], default_msc_event_stats())
-end
-
-# Helper to calculate collision birth and death probability
-function collision_helper(objects::BulletState, a::Int, b::Int, params::MSCParams)
-    # Extract kinematic properties from the bullet state
-    ka = objects.kinematics[a]
-    kb = objects.kinematics[b]
-
-    @inbounds begin
-        dx = kb.position[1] - ka.position[1]
-        dy = kb.position[2] - ka.position[2]
-        dz = kb.position[3] - ka.position[3]
-
-        dvx = kb.linear_vel[1] - ka.linear_vel[1]
-        dvy = kb.linear_vel[2] - ka.linear_vel[2]
-        dvz = kb.linear_vel[3] - ka.linear_vel[3]
-    end
-
-    # Relative distance and velocity in 3D.
-    distance = sqrt(dx^2 + dy^2 + dz^2)
-    inv_distance = 1.0 / max(distance, params.eps)
-
-    # Positive means the surface gap is shrinking.
-    v_closing = -(dvx * dx + dvy * dy + dvz * dz) * inv_distance
-
-    # Surface Gap using bounding-sphere radii.
-    R_ramp  = norm(params.obj_dims[a]) / 2
-    R_table = norm(params.obj_dims[b]) / 2
-    R_sum = R_ramp + R_table
-
-    gap = distance - R_sum
-
-    # Constant velocity time to contact 
-    if gap > 0.0 && v_closing > params.birth_v_min
-        tau = gap / v_closing
-    else
-        tau = NaN               # If the objects are not separated & approaching, tau is meaningless 
-    end
-
-    # Sigmoidal scores 
-    sigmoid(z) = 1 / (1 + exp(-z))
-
-    p_gap = sigmoid((params.birth_gap_max - gap) / params.birth_gap_scale)
-    p_closing = sigmoid((v_closing - params.birth_v_min) / params.birth_v_scale)
-
-    if isnan(tau)
-        p_ttc = 0.0
-    else
-        p_ttc = sigmoid((params.birth_T_contact - tau) / params.birth_tau_scale)
-    end
-
-    # Final collision birth probability for this pair.
-    birth_prob = params.birth_base * p_gap * p_closing * p_ttc
-
-    # Survival probability 
-    near_gap = max(gap, 0.0)
-    near_score = exp(-((near_gap / params.survival_distance_scale)^2))
-
-    return (
-        distance = distance,
-        gap = gap,
-        v_closing = v_closing,
-        tau = tau,
-
-        p_gap = p_gap,
-        p_closing = p_closing,
-        p_ttc = p_ttc,
-
-        birth_prob = birth_prob,
-        near_score = near_score
-    )
-end
-
-# Helper to check if a collision capsule is equal to the proposed one
-function is_same_collision(cap::MSC, a::Int, b::Int)
-    return cap isa CollisionMSC &&
-           ((cap.a == a && cap.b == b) || (cap.a == b && cap.b == a))
-end
-
-# Helper to check if a collision capsule is already in the given vector
-function has_active_collision(capsules::Vector{MSC}, a::Int, b::Int)
-    @inbounds for i in eachindex(capsules)
-        is_same_collision(capsules[i], a, b) && return true
-    end
-    return false
-end
-
-# Helper to increase the age of a capsule
-function increment_age(cap::CollisionMSC)
-    return CollisionMSC(cap.a, cap.b, cap.age + 1)
-end
-
-# Calculate a quick bounding box distance between objects 
-function bounding_box_distance(aabb_a, aabb_b)
-    a_min, a_max = aabb_a
-    b_min, b_max = aabb_b
-    sep_sq = 0.0
-
-    @inbounds for i in 1:3
-        sep = max(a_min[i] - b_max[i], b_min[i] - a_max[i], 0.0)
-        sep_sq += sep^2
-    end
-
-    return sqrt(sep_sq)
-end
-
-# Sparse normalized birth weights. Choice index 1 is reserved for no_birth;
-# choices 2:end map deterministically to inactive collision pairs.
-function collision_birth_weight(st::MSCState, a::Int, b::Int, params::MSCParams, default_weight::Float64)
-    aabb_distance = bounding_box_distance(st.objects.kinematics[a].aabb, st.objects.kinematics[b].aabb)
-    if aabb_distance <= params.birth_aabb_window
-        features = collision_helper(st.objects, a, b, params)
-        return max(Float64(features.birth_prob), default_weight)
-    end
-
-    return default_weight
-end
-
-# Get weights for all collision pairs. Inefficient (2 passes) but highly memory efficient – has sparse arrays. 
-function all_collision_birth_weights(st::MSCState, active_capsules::Vector{MSC}, params::MSCParams)
-    n_objects = length(st.objects.kinematics)
-    default_weight = params.birth_background_weight
-    total_weight = Float64(params.no_birth_weight)
-    n_candidates = 0
-    n_explicit = 0
-
-    for a in 1:(n_objects - 1)
-        for b in (a + 1):n_objects
-            has_active_collision(active_capsules, a, b) && continue
-
-            n_candidates += 1
-            total_weight += default_weight
-
-            weight = collision_birth_weight(st, a, b, params, default_weight)
-            if weight > default_weight
-                n_explicit += 1
-                total_weight += weight - default_weight
-            end
-        end
-    end
-
-    if total_weight <= 0.0
-        return SparseCategoricalWeights(n_candidates + 1, Int[], Float64[], 1.0, 0.0)
-    end
-
-    inv_total = 1.0 / total_weight
-
-    explicit_indices = Vector{Int}(undef, n_explicit)
-    explicit_weights = Vector{Float64}(undef, n_explicit)
-
-    if n_explicit > 0
-        candidate_index = 0
-        explicit_index = 0
-
-        for a in 1:(n_objects - 1)
-            for b in (a + 1):n_objects
-                has_active_collision(active_capsules, a, b) && continue
-
-                candidate_index += 1
-                weight = collision_birth_weight(st, a, b, params, default_weight)
-                if weight > default_weight
-                    explicit_index += 1
-                    @inbounds begin
-                        explicit_indices[explicit_index] = candidate_index + 1
-                        explicit_weights[explicit_index] = weight * inv_total
-                    end
-                end
-            end
-        end
-    end
-
-    return SparseCategoricalWeights(
-        n_candidates + 1,
-        explicit_indices,
-        explicit_weights,
-        Float64(params.no_birth_weight) * inv_total,
-        default_weight * inv_total
-    )
-end
-
-function collision_birth_candidate_pair(st::MSCState, active_capsules::Vector{MSC}, candidate_index::Int)
-    n_objects = length(st.objects.kinematics)
-    seen = 0
-
-    for a in 1:(n_objects - 1)
-        for b in (a + 1):n_objects
-            has_active_collision(active_capsules, a, b) && continue
-
-            seen += 1
-            if seen == candidate_index
-                return a, b
-            end
-        end
-    end
-
-    error("Invalid collision birth candidate index: $candidate_index")
-end
-
-# Helper to clamp probability for numerical stability
-function _clamp_probability(p::Real)
-    return clamp(Float64(p), 1e-4, 1.0 - 1e-4)
-end
-
-# Helper to calculate the survival probability for a collision capsule
-function collision_survival_probability(st::MSCState, cap::CollisionMSC, params::MSCParams)
-    # Get the collision features
-    features = collision_helper(st.objects, cap.a, cap.b, params)
-
-    # Check if the minimum number of steps has passed yet 
-    if cap.age <= params.min_active_steps
-        return params.min_age_survival
-    end
-
-    ## Time of Life Component ## 
-    age_excess = max(cap.age - params.min_active_steps, 0)
-    age_penalty = exp(-age_excess / params.age_decay_steps)
-
-    ## Distance Component ##
-    # near_gap = max(features.gap, 0.0)
-    # near_score = exp(-((near_gap / params.survival_distance_scale)^2))
-
-    ## Velocity Component 
-    # v_separating = -features.v_closing
-    # sigmoid(z) = 1 / (1 + exp(-z))
-    # p_separating = sigmoid((v_separating - params.death_v_min) / params.death_v_scale)
-    # velocity_survival = 1.0 - p_separating
-
-    # Survival prob is e^(-distance/scale)*e^((-age_excess/scale)^2)*(1 - sigmoid((-closing_speed - min_v)/v_scale))
-    p = age_penalty # * near_score * velocity_survival
-
-    return p
-end
 
 #### GENERATIVE FUNCTIONS ####
 
-# A generative function to track all persisting capsules #TODO: Fix this categorical distribution 
+# A generative function to track all persisting capsules
 @gen function capsule_persistence(prev::MSCState, params::MSCParams)
     # Track all capsules that survive
     persisted = Vector{MSC}(undef, length(prev.capsules))
@@ -371,7 +45,7 @@ end
 end
 
 # A generative function to sample new capsules (at most one)
-@gen function sample_new_capsule(prev::MSCState, persisted_capsules::Vector{MSC}, params::MSCParams)
+@gen function sample_new_capsule(t::Int, prev::MSCState, persisted_capsules::Vector{MSC}, params::MSCParams)
 
     # Build sparse normalized weights over no_birth and inactive collision pairs.
     weights = all_collision_birth_weights(prev, persisted_capsules, params)
@@ -397,7 +71,7 @@ end
     end
 
     a, b = collision_birth_candidate_pair(prev, persisted_capsules, choice - 1)
-    new_capsule = CollisionMSC(a, b, 1)
+    new_capsule = CollisionMSC(msc_capsule_id(:collision, a, b), a, b, t, 1)
 
     return (
         born = true,
@@ -407,10 +81,10 @@ end
 end
 
 # A generative function to combine capsule birth, persistence, and death
-@gen function capsule_kernel(prev::MSCState, params::MSCParams)
+@gen function capsule_kernel(t::Int, prev::MSCState, params::MSCParams)
     persisted_result ~ capsule_persistence(prev, params)
 
-    birth_result ~ sample_new_capsule(prev, persisted_result.capsules, params)
+    birth_result ~ sample_new_capsule(t, prev, persisted_result.capsules, params)
 
     n_persisted = length(persisted_result.capsules)
     n_active = n_persisted + (birth_result.born ? 1 : 0)
@@ -438,7 +112,7 @@ end
     )
 end
 
-# Detect the first collision capsule.
+# Detect the first collision capsule. #TODO: this should probably be all capsules, not just the first 
 function first_collision_capsule(capsules::Vector{MSC})
     @inbounds for cap in capsules
         cap isa CollisionMSC && return cap
@@ -456,7 +130,7 @@ end
     return PhySMC.step(sim, prev_objects)
 end
 
-# A function that drifts the mass latent 
+# A function that drifts the mass latent during collision
 @gen function msc_collision_mass_drift(ls::RigidBodyLatents, params::MSCParams)
     prev_mass = ls.data.mass
     mass ~ trunc_norm(prev_mass, params.collision_mass_drift_std, 0.0, Inf)
@@ -492,22 +166,34 @@ const msc_physics_clause = Gen.Switch(
 # A generative function that does the capsule step and physics update.
 @gen function msc_physics_step(t::Int, prev::MSCState, sim::BulletSim, params::MSCParams)
 
-    capsule_update ~ capsule_kernel(prev, params)
+    capsule_update ~ capsule_kernel(t, prev, params)
 
     branch = msc_physics_branch(capsule_update.capsules)
     next_objects ~ msc_physics_clause(branch, prev.objects, sim, capsule_update.capsules, params)
 
     positions ~ Gen.Map(observe)(next_objects.kinematics)
 
+    checkpoint_t = prev.last_mass_checkpoint_t
+    checkpoint_object = prev.last_mass_checkpoint_object
+    if branch == :collision
+        cap = first_collision_capsule(capsule_update.capsules)::CollisionMSC
+        checkpoint_t = t
+        checkpoint_object = cap.a
+    end
+
     return MSCState(
         next_objects,
         capsule_update.capsules,
-        capsule_update.stats
+        capsule_update.stats,
+        checkpoint_t,
+        checkpoint_object
     )
 end
 
+const msc_chain = Gen.Unfold(msc_physics_step)
+
 # Complete MSC model code
-@gen function msc_model(T::Int, sim::BulletSim, template::BulletState, params::MSCParams)
+@gen (static) function msc_model(T::Int, sim::BulletSim, template::BulletState, params::MSCParams)
     # Sample latents from the prior
     latents ~ prior(template.latents)
 
@@ -518,7 +204,7 @@ end
     init_state = initial_msc_state(init_objects, params)
 
     # Final physics and likelihood
-    states ~ Gen.Unfold(msc_physics_step)(T, init_state, sim, params)
+    states ~ msc_chain(T, init_state, sim, params)
 
     return states
 end
@@ -527,10 +213,23 @@ end
 # Rejuvenation proposal for MSC v0
 ################################################################################
 
-@gen function msc_proposal(tr::Gen.Trace)
+# Get the last point in time where the mass variable was sampled 
+function msc_last_mass_checkpoint(tr::Gen.Trace, t::Int)
+    states = get_retval(tr)
+    state = states[min(t, length(states))]
+    return (state.last_mass_checkpoint_t, state.last_mass_checkpoint_object)
+end
+
+# Create a capsule aware proposal for rejuvenation
+@gen function msc_proposal(tr::Gen.Trace, checkpoint_t::Int, object_id::Int)
     choices = get_choices(tr)
-    prev_mass = choices[:latents => :obj1 => :mass]
-    mass = {:latents => :obj1 => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
+    if checkpoint_t == 0
+        prev_mass = choices[:latents => :obj1 => :mass]
+        mass = {:latents => :obj1 => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
+    else
+        prev_mass = choices[:states => checkpoint_t => :next_objects => :obj => object_id => :mass]
+        mass = {:states => checkpoint_t => :next_objects => :obj => object_id => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
+    end
     return mass
 end
 
@@ -552,7 +251,8 @@ function msc_inference_procedure(gm_args::Tuple,
         Gen.maybe_resample!(state, ess_threshold=particles / 2)
 
         for i in 1:particles, s in 1:rejuv_moves
-            state.traces[i], _ = Gen.mh(state.traces[i], msc_proposal, ())
+            checkpoint = msc_last_mass_checkpoint(state.traces[i], t)
+            state.traces[i], _ = Gen.mh(state.traces[i], msc_proposal, checkpoint)
         end
     end
 
@@ -631,7 +331,8 @@ function msc_inference_with_history(gm_args::Tuple,
 
         for i in 1:particles
             for s in 1:rejuv_moves
-                state.traces[i], _ = Gen.mh(state.traces[i], msc_proposal, ())
+                checkpoint = msc_last_mass_checkpoint(state.traces[i], t)
+                state.traces[i], _ = Gen.mh(state.traces[i], msc_proposal, checkpoint)
             end
             capsules = get_retval(state.traces[i])[t].capsules
             println("t=$(t), particle=$(i), capsules=$(capsules), log_score=$(Gen.get_score(state.traces[i]))")
@@ -665,30 +366,8 @@ function msc_inference_with_history(gm_args::Tuple,
 end
 
 ################################################################################
-# Synthetic smoke test and timing spec
+# Timing spec
 ################################################################################
-
-function run_msc_smoke_test(T::Int, sim, template, params::MSCParams=DEFAULT_MSC_PARAMS;
-                            particles=30,
-                            rejuv_moves=2,
-                            ground_truth_mass=nothing)
-    true_mass = ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
-    true_trace, = Gen.generate(msc_model, (T, sim, template, params), mass_constraint(true_mass))
-    observed_positions = observations_from_trace(true_trace)
-    obs = make_observations(observed_positions)
-
-    history = msc_inference_with_history((T, sim, template, params), obs, particles, rejuv_moves)
-    collision_time = detect_collision_time(observed_positions)
-
-    return (
-        true_trace = true_trace,
-        ground_truth_mass = true_mass,
-        observed_positions = observed_positions,
-        obs = obs,
-        history = history,
-        collision_time = collision_time
-    )
-end
 
 function msc_timing_spec(; label="MSC v0", params::MSCParams=DEFAULT_MSC_PARAMS)
     return make_pf_timing_spec(
@@ -699,7 +378,8 @@ function msc_timing_spec(; label="MSC v0", params::MSCParams=DEFAULT_MSC_PARAMS)
         argdiffs = (UnknownChange(), NoChange(), NoChange(), NoChange()),
         rejuvenate! = function (state, t, particles, rejuv_moves)
             for i in 1:particles, s in 1:rejuv_moves
-                state.traces[i], _ = Gen.mh(state.traces[i], msc_proposal, ())
+                checkpoint = msc_last_mass_checkpoint(state.traces[i], t)
+                state.traces[i], _ = Gen.mh(state.traces[i], msc_proposal, checkpoint)
             end
             return nothing
         end

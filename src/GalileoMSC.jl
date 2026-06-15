@@ -18,6 +18,8 @@ include("common.jl")
 include("scenes.jl")
 include("particle_filter_model.jl")
 include("drift_model.jl")
+include("msc_types.jl")
+include("msc_helpers.jl")
 include("msc_model.jl")
 include("plotting.jl")
 include("visualization.jl")
@@ -64,6 +66,8 @@ export
     MSCState,
     MSCEventStats,
     DEFAULT_MSC_PARAMS,
+    msc_capsule_id,
+    msc_capsule_key,
     initial_msc_state,
     collision_survival_probability,
     msc_model,
@@ -72,7 +76,6 @@ export
     msc_inference_with_history,
     extract_msc_capsules,
     summarize_msc_capsules,
-    run_msc_smoke_test,
     msc_timing_spec,
     # plotting
     make_pf_timing_spec,
