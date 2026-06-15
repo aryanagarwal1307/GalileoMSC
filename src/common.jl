@@ -3,7 +3,7 @@
 ################################################################################
 
 @gen function observe(state::RigidBodyState)
-    position ~ broadcasted_normal(state.position, 0.05)
+    position ~ broadcasted_normal(state.position, 0.1)
     return position
 end
 
@@ -23,7 +23,7 @@ end
 const MASS_PRIOR_LOW = 0.25
 const MASS_PRIOR_CENTER = 1.0
 const MASS_PRIOR_HIGH = 4.0
-const MASS_PRIOR_LOG_STD = 0.5
+const MASS_PRIOR_LOG_STD = 0.15
 
 @gen function sample_object(ls::RigidBodyLatents)
     mass ~ log_symmetric_peak(MASS_PRIOR_LOW, MASS_PRIOR_HIGH, MASS_PRIOR_CENTER, MASS_PRIOR_LOG_STD)

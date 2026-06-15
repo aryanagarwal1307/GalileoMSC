@@ -12,13 +12,15 @@
     return next_state
 end
 
-@gen function particle_filter_model(T::Int, sim::BulletSim, template::BulletState)
+const sm_chain = Gen.Unfold(particle_filter_physics_step)
+
+@gen (static) function particle_filter_model(T::Int, sim::BulletSim, template::BulletState)
     # distribution over mass and restitution for objects from the prior
     latents ~ prior(template.latents)
     init_state = Accessors.setproperties(template; latents=latents)
 
     # simulate `T` timesteps; kind of like a for-loop
-    states ~ Gen.Unfold(particle_filter_physics_step)(T, init_state, sim)
+    states ~ sm_chain(T, init_state, sim)
     return states
 end
 
