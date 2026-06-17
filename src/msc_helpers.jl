@@ -129,7 +129,7 @@ function increment_age(cap::CollisionMSC)
     return CollisionMSC(cap.id, cap.a, cap.b, cap.birth_t, cap.age + 1)
 end
 
-# Helper to get all the active capsule IDs
+# Helper to get all the active capsule IDs #TODO: Not sure if this is memory efficient
 function active_capsule_ids(capsules::Vector{MSC})
     ids = Set{Int}()
     sizehint!(ids, length(capsules))
@@ -139,7 +139,7 @@ function active_capsule_ids(capsules::Vector{MSC})
     return ids
 end
 
-# Calculate a quick bounding box distance between objects 
+# Calculate a quick bounding box distance between objects #TODO: Could replace with pybullet API
 function bounding_box_distance(aabb_a, aabb_b)
     a_min, a_max = aabb_a
     b_min, b_max = aabb_b

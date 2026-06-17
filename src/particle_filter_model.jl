@@ -2,7 +2,7 @@
 # Static mass particle-filter model
 ################################################################################
 
-@gen function particle_filter_physics_step(t::Int, prev::BulletState, sim::BulletSim)
+@gen (static) function particle_filter_physics_step(t::Int, prev::BulletState, sim::BulletSim)
     # run a deterministic forward function via PhySMC
     next_state = PhySMC.step(sim, prev)
 
