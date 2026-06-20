@@ -142,17 +142,18 @@ function _scene_source_from_arg(scene_model, scene_args_builder, specs,
     end
 end
 
-function _merge_constraints(base_constraints, ground_truth_mass)
+function _merge_constraints(base_constraints, ground_truth_mass, object_id::Int)
     constraints = base_constraints === nothing ? Gen.choicemap() : base_constraints
     if ground_truth_mass !== nothing
-        constraints[:latents => :obj1 => :mass] = Float64(ground_truth_mass)
+        constraints[:latents => :obj => object_id => :mass] = Float64(ground_truth_mass)
     end
     return constraints
 end
 
 function _ground_truth_mass_from_trace(tr::Gen.Trace)
     try
-        return get_choices(tr)[:latents => :obj1 => :mass]
+        object_id = tracked_mass_object(get_args(tr)[3])
+        return get_choices(tr)[:latents => :obj => object_id => :mass]
     catch
         return nothing
     end
@@ -179,7 +180,7 @@ function sample_shared_scene_bank(T::Int, sim, template;
     scenes = Vector{NamedTuple}(undef, n_scenes)
     scene_args = scene_args_builder(T, sim, template)
     actual_ground_truth_mass = _resolve_ground_truth_mass(template, ground_truth_mass)
-    constraints = _merge_constraints(scene_constraints, actual_ground_truth_mass)
+    constraints = _merge_constraints(scene_constraints, actual_ground_truth_mass, tracked_mass_object(template))
 
     for scene_idx in 1:n_scenes
         true_trace, = Gen.generate(scene_model, scene_args, constraints)
@@ -387,7 +388,7 @@ function run_mass_ratio_history_comparison(models;
                                                                   proposal_drift_std,
                                                                   msc_params)
             actual_ground_truth_mass = _resolve_ground_truth_mass(template, ground_truth_mass)
-            constraints = _merge_constraints(scene_constraints, actual_ground_truth_mass)
+            constraints = _merge_constraints(scene_constraints, actual_ground_truth_mass, tracked_mass_object(template))
             true_trace, = Gen.generate(source_model, source_builder(T, sim, template), constraints)
             observed_positions = observations_from_trace(true_trace)
         end

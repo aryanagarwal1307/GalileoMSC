@@ -15,6 +15,37 @@ function update_latents(ls::RigidBodyLatents, mass::Float64)
     RigidBodyLatents(setproperties(ls.data; mass=mass))
 end
 
+function object_mass(ls::RigidBodyLatents)
+    return Float64(ls.data.mass)
+end
+
+function is_static_object(ls::RigidBodyLatents)
+    return object_mass(ls) == 0.0
+end
+
+function is_dynamic_object(ls::RigidBodyLatents)
+    return object_mass(ls) > 0.0
+end
+
+dynamic_object_indices(latents::AbstractVector) =
+    [i for i in eachindex(latents) if latents[i] isa RigidBodyLatents && is_dynamic_object(latents[i])]
+
+dynamic_object_indices(state::BulletState) = dynamic_object_indices(state.latents)
+
+static_object_indices(latents::AbstractVector) =
+    [i for i in eachindex(latents) if latents[i] isa RigidBodyLatents && is_static_object(latents[i])]
+
+static_object_indices(state::BulletState) = static_object_indices(state.latents)
+
+function tracked_mass_object(latents::AbstractVector, object_id::Int=1)
+    object_id in eachindex(latents) || error("Tracked mass object index $object_id is out of bounds.")
+    latents[object_id] isa RigidBodyLatents || error("Tracked mass object $object_id is not a rigid body.")
+    is_dynamic_object(latents[object_id]) || error("Tracked mass object $object_id must have positive mass.")
+    return object_id
+end
+
+tracked_mass_object(state::BulletState, object_id::Int=1) = tracked_mass_object(state.latents, object_id)
+
 ################################################################################
 # Initial prior
 ################################################################################
@@ -31,13 +62,22 @@ const MASS_PRIOR_LOG_STD = 0.15
 end
 
 @gen function prior(old_latents::Vector{BulletElemLatents})
-    obj1 ~ sample_object(old_latents[1])
-    obj2 = update_latents(old_latents[2], 1.0)
-    return BulletElemLatents[obj1, obj2]
+    target_object = tracked_mass_object(old_latents)
+    new_latents = Vector{BulletElemLatents}(undef, length(old_latents))
+
+    for i in eachindex(old_latents) #TODO: this would need to change to sample more than one object
+        if i == target_object
+            new_latents[i] = {:obj => i} ~ sample_object(old_latents[i])
+        else
+            new_latents[i] = old_latents[i]
+        end
+    end
+
+    return new_latents
 end
 
 ################################################################################
-# Truncated normal
+# Truncated normal #TODO: at some point move this to distributions
 ################################################################################
 
 """
@@ -61,14 +101,17 @@ end
 # Observation construction
 ################################################################################
 
-function make_observations(observed_positions)
+function make_observations(observed_positions; chain_addr::Symbol=:states, object_indices=nothing)
     T = length(observed_positions)
     obs = Vector{Gen.ChoiceMap}(undef, T)
 
     for t in 1:T
         cm = Gen.choicemap()
-        cm[:states => t => :positions => 1 => :position] = observed_positions[t][1]
-        cm[:states => t => :positions => 2 => :position] = observed_positions[t][2]
+        positions_t = observed_positions[t]
+        indices = object_indices === nothing ? eachindex(positions_t) : object_indices
+        for (j, object_id) in enumerate(indices)
+            cm[chain_addr => t => :positions => object_id => :position] = positions_t[j]
+        end
         obs[t] = cm
     end
 
@@ -76,26 +119,29 @@ function make_observations(observed_positions)
 end
 
 function template_mass_ratio(template::BulletState)
-    return Float64(template.latents[1].data.mass)
+    return object_mass(template.latents[tracked_mass_object(template)])
 end
 
-function mass_constraint(mass::Real)
+function mass_constraint(mass::Real; object_id::Int=1)
     isfinite(mass) || error("mass ratio must be finite")
     mass > 0 || error("mass ratio must be positive")
     constraints = Gen.choicemap()
-    constraints[:latents => :obj1 => :mass] = Float64(mass)
+    constraints[:latents => :obj => object_id => :mass] = Float64(mass)
     return constraints
 end
 
-function observations_from_trace(tr::Gen.Trace)
+mass_constraint(mass::Real, template::BulletState) = mass_constraint(mass; object_id=tracked_mass_object(template))
+
+function observations_from_trace(tr::Gen.Trace; chain_addr::Symbol=:states, object_indices=nothing)
     choices = get_choices(tr)
     T = get_args(tr)[1]
+    states = get_retval(tr)
+    index_state = hasproperty(states[1], :objects) ? states[1].objects : states[1]
+    indices = object_indices === nothing ? dynamic_object_indices(index_state) : object_indices
     out = Vector{Any}(undef, T)
 
     for t in 1:T
-        p1 = choices[:states => t => :positions => 1 => :position]
-        p2 = choices[:states => t => :positions => 2 => :position]
-        out[t] = [p1, p2]
+        out[t] = [choices[chain_addr => t => :positions => object_id => :position] for object_id in indices]
     end
 
     return out
@@ -116,18 +162,4 @@ function detect_collision_time(observed_positions; threshold=0.25)
         end
     end
     return nothing
-end
-
-"""
-Choose Gamma(shape, scale) parameters from a target mean and standard deviation.
-"""
-function gamma_from_mean_std(mean_mass::Real, std_mass::Real)
-    mu = Float64(mean_mass)
-    sigma = Float64(std_mass)
-    mu > 0 || error("mean_mass must be positive")
-    sigma > 0 || error("std_mass must be positive")
-
-    shape = (mu / sigma)^2
-    scale = (sigma^2) / mu
-    return (shape=shape, scale=scale)
 end

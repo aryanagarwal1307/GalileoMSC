@@ -84,23 +84,26 @@ begin
 
     function simulate_scene_diagnostics(scene, T::Int, params::MSCParams)
         states = Vector{Any}(undef, T)
-        positions = Array{Float64}(undef, T, 2, 3)
+        dynamic_indices = dynamic_object_indices(scene.init_state)
+        positions = Array{Float64}(undef, T, length(dynamic_indices), 3)
         rows = Vector{NamedTuple}(undef, T)
         state = scene.init_state
+        a = dynamic_indices[1]
+        b = dynamic_indices[2]
 
         for t in 1:T
             state = PhySMC.step(scene.sim, state)
             states[t] = state
 
-            pos1 = vec(state.kinematics[1].position)
-            pos2 = vec(state.kinematics[2].position)
+            pos1 = vec(state.kinematics[a].position)
+            pos2 = vec(state.kinematics[b].position)
             positions[t, 1, :] .= pos1
             positions[t, 2, :] .= pos2
 
-            helper = GalileoMSC.collision_helper(state, 1, 2, params)
+            helper = GalileoMSC.collision_helper(state, a, b, params)
             aabb_distance = GalileoMSC.bounding_box_distance(
-                state.kinematics[1].aabb,
-                state.kinematics[2].aabb,
+                state.kinematics[a].aabb,
+                state.kinematics[b].aabb,
             )
 
             rows[t] = (

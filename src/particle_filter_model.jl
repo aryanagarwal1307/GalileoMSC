@@ -37,11 +37,12 @@ The proposal is truncated so the sampled mass stays physically valid.
 """
 @gen function particle_filter_proposal(tr::Gen.Trace)
     choices = get_choices(tr)
+    object_id = tracked_mass_object(get_args(tr)[3])
 
-    # Only obj1 mass is random in the prior.
-    prev_mass = choices[:latents => :obj1 => :mass]
+    # Only the tracked dynamic object's mass is random in the prior.
+    prev_mass = choices[:latents => :obj => object_id => :mass]
 
-    mass = {:latents => :obj1 => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
+    mass = {:latents => :obj => object_id => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
 
     return mass
 end
@@ -92,7 +93,7 @@ end
 ################################################################################
 
 function extract_particle_filter_masses(traces)
-    [get_choices(tr)[:latents => :obj1 => :mass] for tr in traces]
+    [get_choices(tr)[:latents => :obj => tracked_mass_object(get_args(tr)[3]) => :mass] for tr in traces]
 end
 
 function summarize_masses(traces)
@@ -167,7 +168,7 @@ end
 
 function run_smoke_test(T::Int, sim, template; particles=20, rejuv_moves=1, ground_truth_mass=nothing)
     true_mass = ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
-    tr, = Gen.generate(particle_filter_model, (T, sim, template), mass_constraint(true_mass))
+    tr, = Gen.generate(particle_filter_model, (T, sim, template), mass_constraint(true_mass, template))
     observed_positions = observations_from_trace(tr)
     obs = make_observations(observed_positions)
 
@@ -185,7 +186,7 @@ end
 
 function run_history_smoke_test(T::Int, sim, template; particles=30, rejuv_moves=2, ground_truth_mass=nothing)
     true_mass = ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
-    true_trace, = Gen.generate(particle_filter_model, (T, sim, template), mass_constraint(true_mass))
+    true_trace, = Gen.generate(particle_filter_model, (T, sim, template), mass_constraint(true_mass, template))
     observed_positions = observations_from_trace(true_trace)
     obs = make_observations(observed_positions)
 

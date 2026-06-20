@@ -144,13 +144,11 @@ end
     collision = cap::CollisionMSC
 
     obj_a = {:obj => collision.a} ~ msc_collision_mass_drift(prev_objects.latents[collision.a], params)
-    obj_b = update_latents(prev_objects.latents[collision.b], 1.0)
 
     # Keep untouched object latents persistent while the active collision drifts mass.
     new_latents = Vector{BulletElemLatents}(undef, length(prev_objects.latents))
     copyto!(new_latents, prev_objects.latents)
     new_latents[collision.a] = obj_a
-    new_latents[collision.b] = obj_b
 
     updated_objects = Accessors.setproperties(prev_objects; latents=new_latents)
     return PhySMC.step(sim, updated_objects)
@@ -224,8 +222,10 @@ end
 @gen function msc_proposal(tr::Gen.Trace, checkpoint_t::Int, object_id::Int)
     choices = get_choices(tr)
     if checkpoint_t == 0
-        prev_mass = choices[:latents => :obj1 => :mass]
-        mass = {:latents => :obj1 => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
+        params = get_args(tr)[4]::MSCParams
+        object_id = tracked_mass_object(get_args(tr)[3], params.tracked_mass_object)
+        prev_mass = choices[:latents => :obj => object_id => :mass]
+        mass = {:latents => :obj => object_id => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
     else
         prev_mass = choices[:states => checkpoint_t => :next_objects => :obj => object_id => :mass]
         mass = {:states => checkpoint_t => :next_objects => :obj => object_id => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
@@ -268,8 +268,9 @@ function extract_msc_event_stats(tr::Gen.Trace, t::Int)
 end
 
 function extract_current_msc_mass(tr::Gen.Trace, t::Int, params::MSCParams=DEFAULT_MSC_PARAMS)
-    object_id = params.tracked_mass_object
-    return Float64(get_retval(tr)[t].objects.latents[object_id].data.mass)
+    state = get_retval(tr)[t]
+    object_id = tracked_mass_object(state.objects, params.tracked_mass_object)
+    return object_mass(state.objects.latents[object_id])
 end
 
 function summarize_msc_masses(traces, t::Int, params::MSCParams=DEFAULT_MSC_PARAMS)

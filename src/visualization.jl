@@ -26,7 +26,7 @@ function _positions_at_frame(positions, frame::Int)
     if positions === nothing
         return nothing
     elseif positions isa AbstractArray && ndims(positions) == 3
-        return [vec(positions[frame, 1, :]), vec(positions[frame, 2, :])]
+        return [vec(positions[frame, i, :]) for i in axes(positions, 2)]
     else
         return positions[frame]
     end
@@ -107,15 +107,18 @@ function plot_scene_trajectory(scene, positions; title::AbstractString="Galileo 
     metadata = scene_metadata(scene)
     p = visualize_scene(scene; title=title)
 
-    xs1 = [positions[t, 1, 1] for t in axes(positions, 1)]
-    zs1 = [positions[t, 1, 3] for t in axes(positions, 1)]
-    xs2 = [positions[t, 2, 1] for t in axes(positions, 1)]
-    zs2 = [positions[t, 2, 3] for t in axes(positions, 1)]
+    dynamic_indices = dynamic_object_indices(scene.init_state)
+    colors = [:steelblue4, :saddlebrown, :darkgreen, :purple]
+    for (plot_idx, object_id) in enumerate(dynamic_indices)
+        xs = [positions[t, object_id, 1] for t in axes(positions, 1)]
+        zs = [positions[t, object_id, 3] for t in axes(positions, 1)]
+        Plots.plot!(p, xs, zs;
+                    label="object $object_id path",
+                    lw=2,
+                    color=colors[mod1(plot_idx, length(colors))])
+    end
 
-    Plots.plot!(p, xs1, zs1; label="ramp object path", lw=2, color=:steelblue4)
-    Plots.plot!(p, xs2, zs2; label="table object path", lw=2, color=:saddlebrown)
-
-    final_positions = [vec(positions[end, 1, :]), vec(positions[end, 2, :])]
+    final_positions = [vec(positions[end, object_id, :]) for object_id in dynamic_indices]
     _draw_scene_objects!(p, metadata, final_positions)
 
     return p

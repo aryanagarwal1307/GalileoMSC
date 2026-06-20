@@ -45,7 +45,7 @@ end
 
 # Initializer
 function initial_msc_state(objects::BulletState, params::MSCParams=MSCParams())
-    return MSCState(objects, MSC[], default_msc_event_stats(), 0, 1)
+    return MSCState(objects, MSC[], default_msc_event_stats(), 0, tracked_mass_object(objects, params.tracked_mass_object))
 end
 
 # Helper to calculate collision birth and death probability
@@ -71,10 +71,10 @@ function collision_helper(objects::BulletState, a::Int, b::Int, params::MSCParam
     # Positive means the surface gap is shrinking.
     v_closing = -(dvx * dx + dvy * dy + dvz * dz) * inv_distance
 
-    # Surface Gap using bounding-sphere radii.
-    R_ramp  = norm(params.obj_dims[a]) / 2
-    R_table = norm(params.obj_dims[b]) / 2
-    R_sum = R_ramp + R_table
+    # Surface gap using bounding-sphere radii from the current AABBs.
+    radius_a = norm(ka.aabb[2] .- ka.aabb[1]) / 2
+    radius_b = norm(kb.aabb[2] .- kb.aabb[1]) / 2
+    R_sum = radius_a + radius_b
 
     gap = distance - R_sum
 
@@ -156,6 +156,10 @@ end
 # Sparse normalized birth weights. Choice index 1 is reserved for no_birth;
 # choices 2:end map deterministically to inactive collision pairs.
 function collision_birth_weight(st::MSCState, a::Int, b::Int, params::MSCParams, default_weight::Float64)
+    if !is_dynamic_object(st.objects.latents[a]) || !is_dynamic_object(st.objects.latents[b])
+        return 0.0
+    end
+
     aabb_distance = bounding_box_distance(st.objects.kinematics[a].aabb, st.objects.kinematics[b].aabb)
     if aabb_distance <= params.birth_aabb_window
         features = collision_helper(st.objects, a, b, params)
@@ -167,15 +171,17 @@ end
 
 # Get weights for all collision pairs. Inefficient (2 passes) but highly memory efficient – has sparse arrays. 
 function all_collision_birth_weights(st::MSCState, active_capsules::Vector{MSC}, params::MSCParams)
-    n_objects = length(st.objects.kinematics)
+    object_indices = dynamic_object_indices(st.objects)
     active_ids = active_capsule_ids(active_capsules)
     default_weight = params.birth_background_weight
     total_weight = Float64(params.no_birth_weight)
     n_candidates = 0
     n_explicit = 0
 
-    for a in 1:(n_objects - 1)
-        for b in (a + 1):n_objects
+    for i in 1:(length(object_indices) - 1)
+        a = object_indices[i]
+        for j in (i + 1):length(object_indices)
+            b = object_indices[j]
             has_active_collision(active_ids, a, b) && continue
 
             n_candidates += 1
@@ -202,8 +208,10 @@ function all_collision_birth_weights(st::MSCState, active_capsules::Vector{MSC},
         candidate_index = 0
         explicit_index = 0
 
-        for a in 1:(n_objects - 1)
-            for b in (a + 1):n_objects
+        for i in 1:(length(object_indices) - 1)
+            a = object_indices[i]
+            for j in (i + 1):length(object_indices)
+                b = object_indices[j]
                 has_active_collision(active_ids, a, b) && continue
 
                 candidate_index += 1
@@ -229,12 +237,14 @@ function all_collision_birth_weights(st::MSCState, active_capsules::Vector{MSC},
 end
 
 function collision_birth_candidate_pair(st::MSCState, active_capsules::Vector{MSC}, candidate_index::Int)
-    n_objects = length(st.objects.kinematics)
+    object_indices = dynamic_object_indices(st.objects)
     active_ids = active_capsule_ids(active_capsules)
     seen = 0
 
-    for a in 1:(n_objects - 1)
-        for b in (a + 1):n_objects
+    for i in 1:(length(object_indices) - 1)
+        a = object_indices[i]
+        for j in (i + 1):length(object_indices)
+            b = object_indices[j]
             has_active_collision(active_ids, a, b) && continue
 
             seen += 1

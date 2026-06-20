@@ -1,5 +1,39 @@
 const DEFAULT_RAMP_ASSET_DIR = normpath(joinpath(@__DIR__, "..", "assets"))
 
+struct RampSceneMetadata
+    mass_ratio::Float64
+    obj_frictions::NTuple{2,Float64}
+    obj_positions::NTuple{2,Float64}
+    slope::Float64
+    tableRampIntersection::Float64
+    base_dims::Vector{Float64}
+    table_dims::Vector{Float64}
+    ramp_dims::Vector{Float64}
+    ramp_position::Vector{Float64}
+    ramp_orientation::Float64
+    obj_ramp_dims::Vector{Float64}
+    obj_ramp_position::Vector{Float64}
+    obj_ramp_orientation::Float64
+    obj_table_dims::Vector{Float64}
+    obj_table_position::Vector{Float64}
+    obj_table_orientation::Float64
+end
+
+struct RampScene
+    client::Int
+    obj_1::Int
+    obj_2::Int
+    ramp_surface_id::Int
+    table_surface_id::Int
+    sim::BulletSim
+    obj_r::RigidBody
+    obj_t::RigidBody
+    ramp_surface::RigidBody
+    table_surface::RigidBody
+    init_state::BulletState
+    metadata::RampSceneMetadata
+end
+
 function _ramp_scene_metadata(mass_ratio::Float64,
                               obj_frictions::NTuple{2,Float64},
                               obj_positions::NTuple{2,Float64},
@@ -20,23 +54,23 @@ function _ramp_scene_metadata(mass_ratio::Float64,
     ]
     table_obj_position = [2.5 * (obj_positions[2] - 1), 0.0, obj_on_table_dims[3] / 2]
 
-    return (
-        mass_ratio = mass_ratio,
-        obj_frictions = obj_frictions,
-        obj_positions = obj_positions,
-        slope = slope,
-        tableRampIntersection = tableRampIntersection,
-        base_dims = base_dims,
-        table_dims = table_dims,
-        ramp_dims = [2.0, base_dims[2], 2.0 * slope],
-        ramp_position = ramp_position,
-        ramp_orientation = theta_radians,
-        obj_ramp_dims = obj_ramp_dims,
-        obj_ramp_position = ramp_obj_position,
-        obj_ramp_orientation = theta_radians,
-        obj_table_dims = obj_on_table_dims,
-        obj_table_position = table_obj_position,
-        obj_table_orientation = 0.0
+    return RampSceneMetadata(
+        mass_ratio,
+        obj_frictions,
+        obj_positions,
+        slope,
+        tableRampIntersection,
+        base_dims,
+        table_dims,
+        [2.0, base_dims[2], 2.0 * slope],
+        ramp_position,
+        theta_radians,
+        obj_ramp_dims,
+        ramp_obj_position,
+        theta_radians,
+        obj_on_table_dims,
+        table_obj_position,
+        0.0
     )
 end
 
@@ -153,7 +187,7 @@ function ramp(mass_ratio::Float64,
 
     if return_metadata
         metadata = _ramp_scene_metadata(mass_ratio, obj_frictions, obj_positions, slope, tableRampIntersection)
-        return (client, obj_on_ramp_obj_id, obj_on_table_obj_id, metadata)
+        return (client, obj_on_ramp_obj_id, obj_on_table_obj_id, ramp_obj_id, table_body_id, metadata)
     end
 
     return (client, obj_on_ramp_obj_id, obj_on_table_obj_id)
@@ -165,7 +199,7 @@ function create_ramp_simulation(; mass_ratio::Float64=2.0,
                                 slope::Float64=2 / 3,
                                 tableRampIntersection::Float64=0.0,
                                 connect_mode=pb.DIRECT)
-    client, obj_1, obj_2, metadata = ramp(
+    client, obj_1, obj_2, ramp_surface_id, table_surface_id, metadata = ramp(
         mass_ratio,
         obj_frictions,
         obj_positions,
@@ -179,19 +213,25 @@ function create_ramp_simulation(; mass_ratio::Float64=2.0,
     sim = BulletSim(; client=client)
     obj_r = RigidBody(obj_1) # ramp obj
     obj_t = RigidBody(obj_2) # table obj
+    ramp_surface = RigidBody(ramp_surface_id)
+    table_surface = RigidBody(table_surface_id)
 
-    # get an initial state (to be overwritten in the prior function)
-    init_state = BulletState(sim, [obj_r, obj_t])
+    # State order: moving objects first, then static surfaces.
+    init_state = BulletState(sim, [obj_r, obj_t, ramp_surface, table_surface])
 
-    return (
-        client = client,
-        obj_1 = obj_1,
-        obj_2 = obj_2,
-        sim = sim,
-        obj_r = obj_r,
-        obj_t = obj_t,
-        init_state = init_state,
-        metadata = metadata
+    return RampScene(
+        client,
+        obj_1,
+        obj_2,
+        ramp_surface_id,
+        table_surface_id,
+        sim,
+        obj_r,
+        obj_t,
+        ramp_surface,
+        table_surface,
+        init_state,
+        metadata
     )
 end
 
@@ -227,11 +267,11 @@ end
 
 function simulate_scene_positions(scene, T::Int)
     state = scene.init_state
-    positions = Array{Float64}(undef, T, 2, 3)
+    positions = Array{Float64}(undef, T, length(state.kinematics), 3)
 
     for t in 1:T
         state = PhySMC.step(scene.sim, state)
-        for obj_idx in 1:2
+        for obj_idx in eachindex(state.kinematics)
             positions[t, obj_idx, :] .= state.kinematics[obj_idx].position
         end
     end

@@ -13,12 +13,13 @@ end
 
 """
 Apply latent drift before the next physics step.
-Only obj1 drifts; obj2 is kept fixed at mass=1.
+Only the tracked dynamic object's mass drifts; all other latents persist.
 """
 @gen function drift_step(prev::BulletState, drift_std::Float64)
-    obj1 ~ drift_object(prev.latents[1], drift_std)
-    obj2 = update_latents(prev.latents[2], 1.0)
-    new_latents = BulletElemLatents[obj1, obj2]
+    object_id = tracked_mass_object(prev)
+    new_latents = Vector{BulletElemLatents}(undef, length(prev.latents))
+    copyto!(new_latents, prev.latents)
+    new_latents[object_id] = {:obj => object_id} ~ drift_object(prev.latents[object_id], drift_std)
     new_state = Accessors.setproperties(prev; latents=new_latents)
     return new_state
 end
@@ -51,12 +52,13 @@ end
 """
 MH proposal for the drifted mass at a specific time t.
 Address path is:
-:states => t => :drift => :obj1 => :mass
+:states => t => :drift => :obj => object_id => :mass
 """
 @gen function drift_proposal(tr::Gen.Trace, t::Int, proposal_drift_std::Float64)
     choices = get_choices(tr)
-    prev_mass = choices[:states => t => :drift => :obj1 => :mass]
-    mass = {:states => t => :drift => :obj1 => :mass} ~ trunc_norm(prev_mass, proposal_drift_std, 0.0, Inf)
+    object_id = tracked_mass_object(get_args(tr)[3])
+    prev_mass = choices[:states => t => :drift => :obj => object_id => :mass]
+    mass = {:states => t => :drift => :obj => object_id => :mass} ~ trunc_norm(prev_mass, proposal_drift_std, 0.0, Inf)
     return mass
 end
 
@@ -89,7 +91,8 @@ end
 ################################################################################
 
 function extract_current_drift_mass(tr::Gen.Trace, t::Int)
-    return Float64(get_retval(tr)[t].latents[1].data.mass)
+    state = get_retval(tr)[t]
+    return object_mass(state.latents[tracked_mass_object(state)])
 end
 
 function summarize_drift_masses(traces, t::Int)
@@ -154,7 +157,7 @@ function run_drift_smoke_test(T::Int, sim, template, drift_std::Float64;
                               ground_truth_mass=nothing,
                               proposal_drift_std::Float64=0.25)
     true_mass = ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
-    true_trace, = Gen.generate(drift_model, (T, sim, template, drift_std), mass_constraint(true_mass))
+    true_trace, = Gen.generate(drift_model, (T, sim, template, drift_std), mass_constraint(true_mass, template))
     observed_positions = observations_from_trace(true_trace)
     obs = make_observations(observed_positions)
 
