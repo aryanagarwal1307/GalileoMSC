@@ -26,14 +26,14 @@ Base.@kwdef struct MSCParams
     death_v_scale::Float64 = 0.02               # Velocity parameter
 
     no_birth_weight::Float64 = 0.3              # weight of having no capsule births
-    collision_mass_drift_std::Float64 = 1.5     # std for active-collision mass drift
+    collision_mass_drift_std::Float64 = 1.5     # std for active-collision log-mass deltas
     tracked_mass_object::Int = 1                # object to summarize in mass history
 end
 
 const MSC_EVENT_TYPE_CODES = Dict(:collision => 1, :sliding => 2)
 const MSC_EVENT_TYPES_BY_CODE = Dict(1 => :collision, 2 => :sliding)
 const DEFAULT_MSC_PARAMS = MSCParams()
-const MSC_PHYSICS_BRANCHES = Dict(:no_capsule => 1, :collision => 2)
+const MSC_CLAUSE_BRANCHES = Dict(:collision => 1)
 
 # This is the abstract type for a capsule.
 abstract type MSC end
@@ -73,18 +73,20 @@ struct MSCState
     capsules::Vector{MSC}
     # Statistics for diagnostoc / plotting reasons
     event_stats::MSCEventStats
-    # Most recent time/object at which a collision capsule sampled mass.
-    last_mass_checkpoint_t::Int
-    last_mass_checkpoint_object::Int
+    # Most recent time/capsule clause that sampled an MSC latent.
+    last_clause_checkpoint_t::Int
+    last_clause_checkpoint_msc_id::Int
 end
 
-# A diff structure for one object, all latents to be updated
-struct ObjectDiff
+# A single additive latent update emitted by one capsule.
+struct LatentDelta
     object_id::Int
-    changes::Dict{Symbol, Float64}
+    latent::Symbol
+    delta::Float64
 end
 
 # A diff structure for all objects in a capsule, all latents to be updated
 struct CapsuleDiff
-    diffs::Vector{ObjectDiff}
+    capsule_id::Int
+    deltas::Vector{LatentDelta}
 end

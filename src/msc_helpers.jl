@@ -45,7 +45,44 @@ end
 
 # Initializer
 function initial_msc_state(objects::BulletState, params::MSCParams=MSCParams())
-    return MSCState(objects, MSC[], default_msc_event_stats(), 0, tracked_mass_object(objects, params.tracked_mass_object))
+    tracked_mass_object(objects, params.tracked_mass_object)
+    return MSCState(objects, MSC[], default_msc_event_stats(), 0, 0)
+end
+
+function aggregate_capsule_diffs(capsule_diffs::Vector{CapsuleDiff})
+    n_deltas = 0
+    for capsule_diff in capsule_diffs
+        n_deltas += length(capsule_diff.deltas)
+    end
+
+    totals = Dict{Tuple{Int,Symbol},Float64}()
+    sizehint!(totals, n_deltas)
+
+    for capsule_diff in capsule_diffs
+        for delta in capsule_diff.deltas
+            key = (delta.object_id, delta.latent)
+            totals[key] = get(totals, key, 0.0) + delta.delta
+        end
+    end
+
+    return totals
+end
+
+function apply_capsule_diffs(objects::BulletState, capsule_diffs::Vector{CapsuleDiff})
+    totals = aggregate_capsule_diffs(capsule_diffs)
+    isempty(totals) && return objects
+
+    new_latents = copy(objects.latents)
+    for ((object_id, latent), delta) in totals
+        if latent == :log_mass
+            current = new_latents[object_id]
+            new_latents[object_id] = update_latents(current, object_mass(current) * exp(delta))
+        else
+            error("Unsupported MSC diff latent: $latent")
+        end
+    end
+
+    return Accessors.setproperties(objects; latents=new_latents)
 end
 
 # Helper to calculate collision birth and death probability
