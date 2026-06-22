@@ -99,20 +99,22 @@ end
     )
 end
 
-# Pick the per-capsule clause. #TODO: Is this needed? Can we store cap type in the structs? More capsule types would have to add branches here.
+# Pick the per-capsule clause.
 function msc_clause_branch(cap::MSC)
     cap isa CollisionMSC && return :collision
     error("Unknown capsule type: $(typeof(cap))")
 end
 
-# Active collision capsules contribute a log-mass delta for object a. #TODO: this mass drift behaviour is changed from before - revert?
+# Active collision capsules sample an absolute mass, then encode it as a diff.
 @gen function msc_collision_clause(prev_objects::BulletState, cap::MSC, params::MSCParams)
     collision = cap::CollisionMSC
-    log_mass_delta = {:obj => collision.a => :log_mass_delta} ~ normal(0.0, params.collision_mass_drift_std)
+    prev_mass = object_mass(prev_objects.latents[collision.a])
+    mass = {:obj => collision.a => :mass} ~ trunc_norm(prev_mass, params.collision_mass_drift_std, 0.0, Inf)
+    log_mass_delta = log(mass / prev_mass)
     return CapsuleDiff(collision.id, [LatentDelta(collision.a, :log_mass, log_mass_delta)])
 end
 
-# Switch combinator for active capsule clauses. # TODO: what happened to no collision branch?
+# Switch combinator for active capsule clauses.
 const msc_capsule_clause = Gen.Switch(
     MSC_CLAUSE_BRANCHES,
     msc_collision_clause
@@ -184,17 +186,24 @@ end
 
 msc_last_mass_checkpoint(tr::Gen.Trace, t::Int) = msc_last_clause_checkpoint(tr, t)
 
+@gen function msc_initial_mass_proposal(tr::Gen.Trace, object_id::Int)
+    choices = get_choices(tr)
+    prev_mass = choices[:latents => :obj => object_id => :mass]
+    mass = {:latents => :obj => object_id => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
+    return mass
+end
+
 # Create an MSC-aware rejuvenation move by resampling a clause subtree.
 function msc_proposal_selection(tr::Gen.Trace, checkpoint_t::Int, msc_id::Int)
-    if checkpoint_t == 0
-        params = get_args(tr)[4]::MSCParams
-        object_id = tracked_mass_object(get_args(tr)[3], params.tracked_mass_object)
-        return Gen.select(:latents => :obj => object_id => :mass)
-    end
     return Gen.select(:states => checkpoint_t => :msc_switch => msc_id => :clause)
 end
 
 function msc_proposal(tr::Gen.Trace, checkpoint_t::Int, msc_id::Int)
+    if checkpoint_t == 0
+        params = get_args(tr)[4]::MSCParams
+        object_id = tracked_mass_object(get_args(tr)[3], params.tracked_mass_object)
+        return Gen.mh(tr, msc_initial_mass_proposal, (object_id,))
+    end
     return Gen.mh(tr, msc_proposal_selection(tr, checkpoint_t, msc_id))
 end
 
@@ -301,7 +310,7 @@ function msc_inference_with_history(gm_args::Tuple,
                 state.traces[i], _ = msc_proposal(state.traces[i], checkpoint...)
             end
             capsules = get_retval(state.traces[i])[t].capsules
-            println("t=$(t), particle=$(i), capsules=$(capsules), log_score=$(Gen.get_score(state.traces[i]))")
+            #println("t=$(t), particle=$(i), capsules=$(capsules), log_score=$(Gen.get_score(state.traces[i]))")
         end
 
         current_traces = Gen.sample_unweighted_traces(state, particles)

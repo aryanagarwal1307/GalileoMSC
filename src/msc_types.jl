@@ -26,7 +26,7 @@ Base.@kwdef struct MSCParams
     death_v_scale::Float64 = 0.02               # Velocity parameter
 
     no_birth_weight::Float64 = 0.3              # weight of having no capsule births
-    collision_mass_drift_std::Float64 = 1.5     # std for active-collision log-mass deltas
+    collision_mass_drift_std::Float64 = 1.0     # std for active-collision mass drift
     tracked_mass_object::Int = 1                # object to summarize in mass history
 end
 

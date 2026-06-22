@@ -19,13 +19,13 @@ end
 begin
     Revise.revise()
     selected_models = [:particle_filter, :drift, :msc]
-    T = 100
-    particles = 20
+    T = 120
+    particles = 30
     rejuv_moves = 1
-    drift_std = 1.5
+    drift_std = 1.0
     proposal_drift_std = 1.0
-    true_mass_ratio = 1.6
-    time_bin_size = 5
+    true_mass_ratio = 1.75
+    time_bin_size = 3
 end
 
 # ╔═╡ 83f320e0-8bf0-4373-9fc8-4ff0f2ff8f4b
@@ -41,12 +41,13 @@ runtime_cmp = plot_step_runtime_comparison(
     T = T,
     sim = scene.sim,
     template = scene.init_state,
-    n_scenes = 3,
+    n_scenes = 5,
     scene_model = :particle_filter,
     ground_truth_mass = true_mass_ratio,
     particles = particles,
     rejuv_moves = rejuv_moves,
     drift_std = drift_std,
+    proposal_drift_std = proposal_drift_std,
     seed = 7,
     summary = :mean
 );
