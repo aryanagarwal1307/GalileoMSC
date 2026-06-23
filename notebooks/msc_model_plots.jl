@@ -22,7 +22,7 @@ begin
     particles = 20
     rejuv_moves = 1
     true_mass_ratio = 1.75
-    true_obj_frictions = (0.3, 0.3)
+    true_obj_frictions = (0.2, 0.4)
     time_bin_size = 10
     rng_seed = 11
 end
