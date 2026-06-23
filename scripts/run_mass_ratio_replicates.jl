@@ -226,6 +226,8 @@ function generate_observed_positions(config)
     scene = make_scene(config)
     tracked_object = GalileoMSC.tracked_mass_object(scene.init_state)
     constraints = mass_constraint(config.mass_ratio; object_id=tracked_object)
+    set_friction_constraints!(constraints, config.obj_frictions;
+                              object_indices=dynamic_object_indices(scene.init_state))
 
     trace = if config.scene_model in (:particle_filter, :particlefilter, :pf, :static)
         first(Gen.generate(particle_filter_model, (config.T, scene.sim, scene.init_state), constraints))
@@ -239,10 +241,14 @@ function generate_observed_positions(config)
     end
 
     ground_truth_mass = get_choices(trace)[:latents => :obj => tracked_object => :mass]
+    ground_truth_frictions = Dict(
+        object_id => get_choices(trace)[:latents => :obj => object_id => :lateralFriction]
+        for object_id in dynamic_object_indices(scene.init_state)
+    )
     observed_positions = observations_from_trace(trace)
     collision_time = detect_collision_time(observed_positions)
     disconnect_scene(scene)
-    return observed_positions, collision_time, ground_truth_mass
+    return observed_positions, collision_time, ground_truth_mass, ground_truth_frictions
 end
 
 function _galileo_disconnect_scene(scene)
@@ -908,7 +914,7 @@ function write_runtime_summary_csv(path, runtime_rows)
     return write_csv(path, header, rows)
 end
 
-function write_metadata_csv(path, config, collision_time, ground_truth_mass, elapsed_s, n_workers)
+function write_metadata_csv(path, config, collision_time, ground_truth_mass, ground_truth_frictions, elapsed_s, n_workers)
     rows = [
         ["created_at", string(now())],
         ["project_root", PROJECT_ROOT],
@@ -939,6 +945,8 @@ function write_metadata_csv(path, config, collision_time, ground_truth_mass, ela
         ["ground_truth_mass_address", ":latents => :obj => tracked_object => :mass"],
         ["ground_truth_mass_note", "Synthetic scene generation constrains the initial mass ratio. For drift scene generation this is the constrained initial mass."],
         ["obj_frictions", join(config.obj_frictions, ",")],
+        ["ground_truth_frictions", join([ground_truth_frictions[k] for k in sort(collect(keys(ground_truth_frictions)))], ",")],
+        ["ground_truth_friction_addresses", join([":latents => :obj => $k => :lateralFriction" for k in sort(collect(keys(ground_truth_frictions)))], "; ")],
         ["obj_positions", join(config.obj_positions, ",")],
         ["slope", config.slope],
         ["table_ramp_intersection", config.table_ramp_intersection],
@@ -1070,9 +1078,10 @@ function main(args)
     println("Plot time bin size: $(config.time_bin_size)")
 
     started = time()
-    observed_positions, collision_time, ground_truth_mass = generate_observed_positions(config)
+    observed_positions, collision_time, ground_truth_mass, ground_truth_frictions = generate_observed_positions(config)
     println("Shared scene collision_time = $(collision_time)")
     println("Ground-truth mass ratio = $(ground_truth_mass)")
+    println("Ground-truth object frictions = $(ground_truth_frictions)")
 
     tasks = build_tasks(config, observed_positions)
     task_results = pmap(_galileo_run_mass_task, tasks)
@@ -1097,7 +1106,7 @@ function main(args)
     end
 
     elapsed_s = time() - started
-    metadata_path = write_metadata_csv(joinpath(config.out_dir, "metadata.csv"), config, collision_time, ground_truth_mass, elapsed_s, n_workers)
+    metadata_path = write_metadata_csv(joinpath(config.out_dir, "metadata.csv"), config, collision_time, ground_truth_mass, ground_truth_frictions, elapsed_s, n_workers)
 
     @printf("Finished in %.2f seconds.\n", elapsed_s)
     println("Wrote:")

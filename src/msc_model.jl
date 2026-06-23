@@ -177,11 +177,28 @@ end
 
 msc_last_mass_checkpoint(tr::Gen.Trace, t::Int) = msc_last_clause_checkpoint(tr, t)
 
-@gen function msc_initial_mass_proposal(tr::Gen.Trace, object_id::Int)
+@gen function msc_initial_latents_proposal(tr::Gen.Trace,
+                                           mass_object_id::Int,
+                                           friction_object_ids::Vector{Int})
     choices = get_choices(tr)
-    prev_mass = choices[:latents => :obj => object_id => :mass]
-    mass = {:latents => :obj => object_id => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
+    prev_mass = choices[:latents => :obj => mass_object_id => :mass]
+    mass = {:latents => :obj => mass_object_id => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
+
+    for object_id in friction_object_ids
+        prev_friction = choices[:latents => :obj => object_id => :lateralFriction]
+        lateralFriction = {:latents => :obj => object_id => :lateralFriction} ~
+            trunc_norm(prev_friction, FRICTION_PROPOSAL_STD, FRICTION_PRIOR_LOW, FRICTION_PRIOR_HIGH)
+    end
+
     return mass
+end
+
+function msc_initial_latents_move(tr::Gen.Trace)
+    params = get_args(tr)[4]::MSCParams
+    template = get_args(tr)[3]
+    mass_object_id = tracked_mass_object(template, params.tracked_mass_object)
+    friction_object_ids = dynamic_object_indices(template)
+    return Gen.mh(tr, msc_initial_latents_proposal, (mass_object_id, friction_object_ids))
 end
 
 # Create an MSC-aware rejuvenation move by resampling a clause subtree.
@@ -191,9 +208,7 @@ end
 
 function msc_proposal(tr::Gen.Trace, checkpoint_t::Int, msc_id::Int)
     if checkpoint_t == 0
-        params = get_args(tr)[4]::MSCParams
-        object_id = tracked_mass_object(get_args(tr)[3], params.tracked_mass_object)
-        return Gen.mh(tr, msc_initial_mass_proposal, (object_id,))
+        return msc_initial_latents_move(tr)
     end
     return Gen.mh(tr, msc_proposal_selection(tr, checkpoint_t, msc_id))
 end
@@ -216,8 +231,11 @@ function msc_inference_procedure(gm_args::Tuple,
         Gen.maybe_resample!(state, ess_threshold=particles / 2)
 
         for i in 1:particles, s in 1:rejuv_moves
+            state.traces[i], _ = msc_initial_latents_move(state.traces[i])
             checkpoint = msc_last_clause_checkpoint(state.traces[i], t)
-            state.traces[i], _ = msc_proposal(state.traces[i], checkpoint...)
+            if checkpoint[1] != 0
+                state.traces[i], _ = msc_proposal(state.traces[i], checkpoint...)
+            end
         end
     end
 
@@ -242,8 +260,11 @@ function msc_inference_with_history(gm_args::Tuple,
 
         for i in 1:particles
             for s in 1:rejuv_moves
+                state.traces[i], _ = msc_initial_latents_move(state.traces[i])
                 checkpoint = msc_last_clause_checkpoint(state.traces[i], t)
-                state.traces[i], _ = msc_proposal(state.traces[i], checkpoint...)
+                if checkpoint[1] != 0
+                    state.traces[i], _ = msc_proposal(state.traces[i], checkpoint...)
+                end
             end
             capsules = get_retval(state.traces[i])[t].capsules
             #println("t=$(t), particle=$(i), capsules=$(capsules), log_score=$(Gen.get_score(state.traces[i]))")
@@ -269,6 +290,7 @@ function msc_inference_with_history(gm_args::Tuple,
             capsule_mean_death_count = capsule_summary.capsule_mean_death_count,
             capsule_mean_age = capsule_summary.capsule_mean_age,
             capsule_mean_birth_probability = capsule_summary.capsule_mean_birth_probability,
+            frictions = summarize_msc_frictions(current_traces, t),
             traces = current_traces
         )
     end

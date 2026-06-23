@@ -22,6 +22,7 @@ begin
     particles = 20
     rejuv_moves = 1
     true_mass_ratio = 1.75
+    true_obj_frictions = (0.3, 0.3)
     time_bin_size = 10
     rng_seed = 11
 end
@@ -29,7 +30,7 @@ end
 # ╔═╡ 109177a5-67d9-42b4-8db0-23c9c929894f
 scene = create_ramp_simulation(
     mass_ratio = true_mass_ratio,
-    obj_frictions = (0.3, 0.3),
+    obj_frictions = true_obj_frictions,
     obj_positions = (0.5, 1.5)
 );
 
@@ -53,6 +54,7 @@ mass_and_msc_cmp = run_mass_ratio_history_comparison(
     template = scene.init_state,
     scene_model = :particle_filter,
     ground_truth_mass = true_mass_ratio,
+    ground_truth_frictions = true_obj_frictions,
     particles = particles,
     rejuv_moves = rejuv_moves,
     seed = rng_seed
@@ -144,6 +146,24 @@ plot_mass_ratio_variance_comparison(
     title = "Particle filter vs MSC posterior variance"
 )
 
+# ╔═╡ 425e5c8d-c9b0-4f72-98f3-57132063be8c
+plot(
+    GalileoMSC.plot_friction_history_comparison(
+        mass_and_msc_cmp;
+        object_id = 1,
+        time_bin_size = time_bin_size,
+        title = "Ramp object posterior lateral friction"
+    ),
+    GalileoMSC.plot_friction_history_comparison(
+        mass_and_msc_cmp;
+        object_id = 2,
+        time_bin_size = time_bin_size,
+        title = "Table object posterior lateral friction"
+    );
+    layout = (2, 1),
+    size = (900, 650)
+)
+
 # ╔═╡ Cell order:
 # ╠═9f5b47fc-1f86-4e7d-8fd0-1600866ef6d5
 # ╠═a62867f7-cad0-443b-9135-58cdd6561e06
@@ -156,3 +176,4 @@ plot_mass_ratio_variance_comparison(
 # ╠═74e366ec-8f05-4235-a4e7-b4e17725ee21
 # ╠═d5995f77-6cf6-4867-b21d-72febed2fb8e
 # ╠═8678d0a3-f37e-4391-937e-058a3e794052
+# ╠═425e5c8d-c9b0-4f72-98f3-57132063be8c

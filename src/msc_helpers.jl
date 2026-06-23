@@ -77,6 +77,12 @@ function apply_capsule_diffs(objects::BulletState, capsule_diffs::Vector{Capsule
         if latent == :log_mass
             current = new_latents[object_id]
             new_latents[object_id] = update_latents(current, object_mass(current) * exp(delta))
+        elseif latent == :log_lateralFriction
+            current = new_latents[object_id]
+            new_latents[object_id] = update_latents(
+                current;
+                lateralFriction=object_lateral_friction(current) * exp(delta)
+            )
         else
             error("Unsupported MSC diff latent: $latent")
         end
@@ -122,6 +128,33 @@ function summarize_msc_masses(traces, t::Int, params::MSCParams=DEFAULT_MSC_PARA
     )
 end
 
+function extract_current_msc_friction(tr::Gen.Trace, t::Int, object_id::Int)
+    state = get_retval(tr)[t]
+    return object_lateral_friction(state.objects.latents[object_id])
+end
+
+function summarize_msc_frictions(traces, t::Int; object_indices=nothing)
+    isempty(traces) && return Dict{Int,NamedTuple}()
+    state = get_retval(traces[1])[t]
+    indices = object_indices === nothing ? dynamic_object_indices(state.objects) : object_indices
+
+    return Dict(
+        object_id => begin
+            values = Float64[extract_current_msc_friction(tr, t, object_id) for tr in traces]
+            (
+                mean = mean(values),
+                std = std(values),
+                q05 = quantile(values, 0.05),
+                q25 = quantile(values, 0.25),
+                q75 = quantile(values, 0.75),
+                q95 = quantile(values, 0.95),
+                frictions = values
+            )
+        end
+        for object_id in indices
+    )
+end
+
 function _mean_active_capsule_age(capsules::Vector{MSC})
     isempty(capsules) && return 0.0
     return mean(Float64[cap.age for cap in capsules])
@@ -159,8 +192,11 @@ function msc_timing_spec(; label="MSC v0", params::MSCParams=DEFAULT_MSC_PARAMS)
         argdiffs = (UnknownChange(), NoChange(), NoChange(), NoChange()),
         rejuvenate! = function (state, t, particles, rejuv_moves)
             for i in 1:particles, s in 1:rejuv_moves
+                state.traces[i], _ = msc_initial_latents_move(state.traces[i])
                 checkpoint = msc_last_clause_checkpoint(state.traces[i], t)
-                state.traces[i], _ = msc_proposal(state.traces[i], checkpoint...)
+                if checkpoint[1] != 0
+                    state.traces[i], _ = msc_proposal(state.traces[i], checkpoint...)
+                end
             end
             return nothing
         end

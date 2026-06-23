@@ -15,7 +15,7 @@ end
 const sm_chain = Gen.Unfold(particle_filter_physics_step)
 
 @gen (static) function particle_filter_model(T::Int, sim::BulletSim, template::BulletState)
-    # distribution over mass and restitution for objects from the prior
+    # Sample physical latents once, then keep them fixed through the rollout.
     latents ~ prior(template.latents)
     init_state = Accessors.setproperties(template; latents=latents)
 
@@ -31,18 +31,23 @@ const model = particle_filter_model
 ################################################################################
 
 """
-This proposal function implements a random walk for the ramp object's mass.
+This proposal function implements random walks for the initial mass and object frictions.
 
-The proposal is truncated so the sampled mass stays physically valid.
+The proposals are truncated so sampled physical parameters stay valid.
 """
 @gen function particle_filter_proposal(tr::Gen.Trace)
     choices = get_choices(tr)
-    object_id = tracked_mass_object(get_args(tr)[3])
+    template = get_args(tr)[3]
+    object_id = tracked_mass_object(template)
 
-    # Only the tracked dynamic object's mass is random in the prior.
     prev_mass = choices[:latents => :obj => object_id => :mass]
-
     mass = {:latents => :obj => object_id => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
+
+    for friction_object_id in dynamic_object_indices(template)
+        prev_friction = choices[:latents => :obj => friction_object_id => :lateralFriction]
+        lateralFriction = {:latents => :obj => friction_object_id => :lateralFriction} ~
+            trunc_norm(prev_friction, FRICTION_PROPOSAL_STD, FRICTION_PRIOR_LOW, FRICTION_PRIOR_HIGH)
+    end
 
     return mass
 end
@@ -120,6 +125,36 @@ function summarize_trace_set(traces)
     )
 end
 
+function extract_particle_filter_frictions(traces; object_indices=nothing)
+    isempty(traces) && return Dict{Int,Vector{Float64}}()
+    template = get_args(traces[1])[3]
+    indices = object_indices === nothing ? dynamic_object_indices(template) : object_indices
+
+    return Dict(
+        object_id => [
+            get_choices(tr)[:latents => :obj => object_id => :lateralFriction]
+            for tr in traces
+        ]
+        for object_id in indices
+    )
+end
+
+function summarize_particle_filter_frictions(traces; object_indices=nothing)
+    fs = extract_particle_filter_frictions(traces; object_indices=object_indices)
+    return Dict(
+        object_id => (
+            mean = mean(values),
+            std = std(values),
+            q05 = quantile(values, 0.05),
+            q25 = quantile(values, 0.25),
+            q75 = quantile(values, 0.75),
+            q95 = quantile(values, 0.95),
+            frictions = values
+        )
+        for (object_id, values) in fs
+    )
+end
+
 ################################################################################
 # Sequential inference with stored history
 ################################################################################
@@ -155,6 +190,7 @@ function inference_with_history(gm_args::Tuple,
             q75 = summ.q75,
             q05 = summ.q05,
             q95 = summ.q95,
+            frictions = summarize_particle_filter_frictions(current_traces),
             traces = current_traces
         )
     end
@@ -168,7 +204,10 @@ end
 
 function run_smoke_test(T::Int, sim, template; particles=20, rejuv_moves=1, ground_truth_mass=nothing)
     true_mass = ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
-    tr, = Gen.generate(particle_filter_model, (T, sim, template), mass_constraint(true_mass, template))
+    constraints = mass_constraint(true_mass, template)
+    set_friction_constraints!(constraints, template_lateral_frictions(template);
+                              object_indices=dynamic_object_indices(template))
+    tr, = Gen.generate(particle_filter_model, (T, sim, template), constraints)
     observed_positions = observations_from_trace(tr)
     obs = make_observations(observed_positions)
 
@@ -186,7 +225,10 @@ end
 
 function run_history_smoke_test(T::Int, sim, template; particles=30, rejuv_moves=2, ground_truth_mass=nothing)
     true_mass = ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
-    true_trace, = Gen.generate(particle_filter_model, (T, sim, template), mass_constraint(true_mass, template))
+    constraints = mass_constraint(true_mass, template)
+    set_friction_constraints!(constraints, template_lateral_frictions(template);
+                              object_indices=dynamic_object_indices(template))
+    true_trace, = Gen.generate(particle_filter_model, (T, sim, template), constraints)
     observed_positions = observations_from_trace(true_trace)
     obs = make_observations(observed_positions)
 

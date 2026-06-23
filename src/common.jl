@@ -11,12 +11,25 @@ end
 # Latent update helpers
 ################################################################################
 
-function update_latents(ls::RigidBodyLatents, mass::Float64)
-    RigidBodyLatents(setproperties(ls.data; mass=mass))
+function update_latents(ls::RigidBodyLatents; mass=nothing, lateralFriction=nothing)
+    data = ls.data
+    if mass !== nothing
+        data = setproperties(data; mass=Float64(mass))
+    end
+    if lateralFriction !== nothing
+        data = setproperties(data; lateralFriction=Float64(lateralFriction))
+    end
+    return RigidBodyLatents(data)
 end
+
+update_latents(ls::RigidBodyLatents, mass::Real) = update_latents(ls; mass=mass)
 
 function object_mass(ls::RigidBodyLatents)
     return Float64(ls.data.mass)
+end
+
+function object_lateral_friction(ls::RigidBodyLatents)
+    return Float64(ls.data.lateralFriction)
 end
 
 function is_static_object(ls::RigidBodyLatents)
@@ -56,18 +69,33 @@ const MASS_PRIOR_CENTER = 1.0
 const MASS_PRIOR_HIGH = 4.0
 const MASS_PRIOR_LOG_STD = 0.15
 
+const FRICTION_PRIOR_LOW = 0.05
+const FRICTION_PRIOR_CENTER = 0.3
+const FRICTION_PRIOR_HIGH = 1.25
+const FRICTION_PRIOR_LOG_STD = 0.35
+const FRICTION_PROPOSAL_STD = 0.05
+
 @gen function sample_object(ls::RigidBodyLatents)
     mass ~ log_symmetric_peak(MASS_PRIOR_LOW, MASS_PRIOR_HIGH, MASS_PRIOR_CENTER, MASS_PRIOR_LOG_STD)
-    return update_latents(ls, mass)
+    lateralFriction ~ log_symmetric_peak(FRICTION_PRIOR_LOW, FRICTION_PRIOR_HIGH, FRICTION_PRIOR_CENTER, FRICTION_PRIOR_LOG_STD)
+    return update_latents(ls; mass=mass, lateralFriction=lateralFriction)
+end
+
+@gen function sample_friction_object(ls::RigidBodyLatents)
+    lateralFriction ~ log_symmetric_peak(FRICTION_PRIOR_LOW, FRICTION_PRIOR_HIGH, FRICTION_PRIOR_CENTER, FRICTION_PRIOR_LOG_STD)
+    return update_latents(ls; lateralFriction=lateralFriction)
 end
 
 @gen function prior(old_latents::Vector{BulletElemLatents})
     target_object = tracked_mass_object(old_latents)
+    friction_objects = Set(dynamic_object_indices(old_latents))
     new_latents = Vector{BulletElemLatents}(undef, length(old_latents))
 
-    for i in eachindex(old_latents) #TODO: this would need to change to sample more than one object
+    for i in eachindex(old_latents)
         if i == target_object
             new_latents[i] = {:obj => i} ~ sample_object(old_latents[i])
+        elseif i in friction_objects
+            new_latents[i] = {:obj => i} ~ sample_friction_object(old_latents[i])
         else
             new_latents[i] = old_latents[i]
         end
@@ -122,6 +150,10 @@ function template_mass_ratio(template::BulletState)
     return object_mass(template.latents[tracked_mass_object(template)])
 end
 
+function template_lateral_frictions(template::BulletState; object_indices=dynamic_object_indices(template))
+    return [object_lateral_friction(template.latents[i]) for i in object_indices]
+end
+
 function mass_constraint(mass::Real; object_id::Int=1)
     isfinite(mass) || error("mass ratio must be finite")
     mass > 0 || error("mass ratio must be positive")
@@ -131,6 +163,30 @@ function mass_constraint(mass::Real; object_id::Int=1)
 end
 
 mass_constraint(mass::Real, template::BulletState) = mass_constraint(mass; object_id=tracked_mass_object(template))
+
+function set_friction_constraints!(constraints, frictions; object_indices=eachindex(frictions))
+    length(frictions) == length(object_indices) ||
+        error("frictions and object_indices must have the same length")
+
+    for (j, object_id) in enumerate(object_indices)
+        raw_friction = frictions isa AbstractDict ? frictions[object_id] : frictions[j]
+        friction = Float64(raw_friction)
+        isfinite(friction) || error("lateral friction must be finite")
+        FRICTION_PRIOR_LOW <= friction <= FRICTION_PRIOR_HIGH ||
+            error("lateral friction must be within the prior support")
+        constraints[:latents => :obj => object_id => :lateralFriction] = friction
+    end
+
+    return constraints
+end
+
+function friction_constraint(frictions; object_indices=eachindex(frictions))
+    constraints = Gen.choicemap()
+    return set_friction_constraints!(constraints, frictions; object_indices=object_indices)
+end
+
+friction_constraint(frictions, template::BulletState) =
+    friction_constraint(frictions; object_indices=dynamic_object_indices(template))
 
 function observations_from_trace(tr::Gen.Trace; chain_addr::Symbol=:states, object_indices=nothing)
     choices = get_choices(tr)

@@ -2,24 +2,45 @@
 # Drift model
 ################################################################################
 
+const FRICTION_DRIFT_STD = 0.03
+const FRICTION_PROPOSAL_DRIFT_STD = 0.05
+
 """
-Drift the unknown object's mass around its previous value.
+Drift the tracked object's mass and lateral friction around their previous values.
 """
 @gen function drift_object(ls::RigidBodyLatents, drift_std::Float64)
     prev_mass = ls.data.mass
     mass ~ trunc_norm(prev_mass, drift_std, 0.0, Inf)
-    return update_latents(ls, mass)
+
+    prev_friction = object_lateral_friction(ls)
+    lateralFriction ~ trunc_norm(prev_friction, FRICTION_DRIFT_STD, FRICTION_PRIOR_LOW, FRICTION_PRIOR_HIGH)
+
+    return update_latents(ls; mass=mass, lateralFriction=lateralFriction)
+end
+
+@gen function drift_friction_object(ls::RigidBodyLatents)
+    prev_friction = object_lateral_friction(ls)
+    lateralFriction ~ trunc_norm(prev_friction, FRICTION_DRIFT_STD, FRICTION_PRIOR_LOW, FRICTION_PRIOR_HIGH)
+    return update_latents(ls; lateralFriction=lateralFriction)
 end
 
 """
 Apply latent drift before the next physics step.
-Only the tracked dynamic object's mass drifts; all other latents persist.
+Only the tracked dynamic object's mass drifts; all dynamic object frictions drift.
 """
 @gen function drift_step(prev::BulletState, drift_std::Float64)
     object_id = tracked_mass_object(prev)
     new_latents = Vector{BulletElemLatents}(undef, length(prev.latents))
     copyto!(new_latents, prev.latents)
-    new_latents[object_id] = {:obj => object_id} ~ drift_object(prev.latents[object_id], drift_std)
+
+    for i in dynamic_object_indices(prev)
+        if i == object_id
+            new_latents[i] = {:obj => i} ~ drift_object(prev.latents[i], drift_std)
+        else
+            new_latents[i] = {:obj => i} ~ drift_friction_object(prev.latents[i])
+        end
+    end
+
     new_state = Accessors.setproperties(prev; latents=new_latents)
     return new_state
 end
@@ -51,14 +72,24 @@ end
 
 """
 MH proposal for the drifted mass at a specific time t.
-Address path is:
+Address paths are:
 :states => t => :drift => :obj => object_id => :mass
+:states => t => :drift => :obj => object_id => :lateralFriction
 """
 @gen function drift_proposal(tr::Gen.Trace, t::Int, proposal_drift_std::Float64)
     choices = get_choices(tr)
-    object_id = tracked_mass_object(get_args(tr)[3])
+    template = get_args(tr)[3]
+    object_id = tracked_mass_object(template)
+
     prev_mass = choices[:states => t => :drift => :obj => object_id => :mass]
     mass = {:states => t => :drift => :obj => object_id => :mass} ~ trunc_norm(prev_mass, proposal_drift_std, 0.0, Inf)
+
+    for friction_object_id in dynamic_object_indices(template)
+        prev_friction = choices[:states => t => :drift => :obj => friction_object_id => :lateralFriction]
+        lateralFriction = {:states => t => :drift => :obj => friction_object_id => :lateralFriction} ~
+            trunc_norm(prev_friction, FRICTION_PROPOSAL_DRIFT_STD, FRICTION_PRIOR_LOW, FRICTION_PRIOR_HIGH)
+    end
+
     return mass
 end
 
@@ -108,6 +139,33 @@ function summarize_drift_masses(traces, t::Int)
     )
 end
 
+function extract_current_drift_friction(tr::Gen.Trace, t::Int, object_id::Int)
+    state = get_retval(tr)[t]
+    return object_lateral_friction(state.latents[object_id])
+end
+
+function summarize_drift_frictions(traces, t::Int; object_indices=nothing)
+    isempty(traces) && return Dict{Int,NamedTuple}()
+    state = get_retval(traces[1])[t]
+    indices = object_indices === nothing ? dynamic_object_indices(state) : object_indices
+
+    return Dict(
+        object_id => begin
+            values = [extract_current_drift_friction(tr, t, object_id) for tr in traces]
+            (
+                mean = mean(values),
+                std = std(values),
+                q05 = quantile(values, 0.05),
+                q25 = quantile(values, 0.25),
+                q75 = quantile(values, 0.75),
+                q95 = quantile(values, 0.95),
+                frictions = values
+            )
+        end
+        for object_id in indices
+    )
+end
+
 function drift_inference_with_history(gm_args::Tuple,
                                       obs::Vector{Gen.ChoiceMap},
                                       particles::Int=20,
@@ -140,6 +198,7 @@ function drift_inference_with_history(gm_args::Tuple,
             q25 = summ.q25,
             q75 = summ.q75,
             q95 = summ.q95,
+            frictions = summarize_drift_frictions(current_traces, t),
             traces = current_traces
         )
     end
@@ -157,7 +216,10 @@ function run_drift_smoke_test(T::Int, sim, template, drift_std::Float64;
                               ground_truth_mass=nothing,
                               proposal_drift_std::Float64=0.25)
     true_mass = ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
-    true_trace, = Gen.generate(drift_model, (T, sim, template, drift_std), mass_constraint(true_mass, template))
+    constraints = mass_constraint(true_mass, template)
+    set_friction_constraints!(constraints, template_lateral_frictions(template);
+                              object_indices=dynamic_object_indices(template))
+    true_trace, = Gen.generate(drift_model, (T, sim, template, drift_std), constraints)
     observed_positions = observations_from_trace(true_trace)
     obs = make_observations(observed_positions)
 

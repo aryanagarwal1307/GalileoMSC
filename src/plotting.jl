@@ -142,10 +142,18 @@ function _scene_source_from_arg(scene_model, scene_args_builder, specs,
     end
 end
 
-function _merge_constraints(base_constraints, ground_truth_mass, object_id::Int)
+function _merge_constraints(base_constraints,
+                            ground_truth_mass,
+                            object_id::Int,
+                            ground_truth_frictions=nothing,
+                            friction_object_ids=nothing)
     constraints = base_constraints === nothing ? Gen.choicemap() : base_constraints
     if ground_truth_mass !== nothing
         constraints[:latents => :obj => object_id => :mass] = Float64(ground_truth_mass)
+    end
+    if ground_truth_frictions !== nothing
+        ids = friction_object_ids === nothing ? eachindex(ground_truth_frictions) : friction_object_ids
+        set_friction_constraints!(constraints, ground_truth_frictions; object_indices=ids)
     end
     return constraints
 end
@@ -163,6 +171,28 @@ function _resolve_ground_truth_mass(template, ground_truth_mass)
     return ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
 end
 
+function _resolve_ground_truth_frictions(template, ground_truth_frictions)
+    if ground_truth_frictions === nothing
+        return template_lateral_frictions(template)
+    elseif ground_truth_frictions isa AbstractDict
+        return [Float64(ground_truth_frictions[i]) for i in dynamic_object_indices(template)]
+    end
+
+    return collect(Float64, ground_truth_frictions)
+end
+
+function _ground_truth_frictions_from_trace(tr::Gen.Trace)
+    try
+        template = get_args(tr)[3]
+        return Dict(
+            object_id => get_choices(tr)[:latents => :obj => object_id => :lateralFriction]
+            for object_id in dynamic_object_indices(template)
+        )
+    catch
+        return nothing
+    end
+end
+
 """
 Sample one shared bank of observation sequences.
 
@@ -175,12 +205,19 @@ function sample_shared_scene_bank(T::Int, sim, template;
                                   scene_args_builder=(T, sim, template) -> (T, sim, template),
                                   scene_constraints=nothing,
                                   ground_truth_mass=nothing,
+                                  ground_truth_frictions=nothing,
                                   seed::Int=1)
     Random.seed!(seed)
     scenes = Vector{NamedTuple}(undef, n_scenes)
     scene_args = scene_args_builder(T, sim, template)
     actual_ground_truth_mass = _resolve_ground_truth_mass(template, ground_truth_mass)
-    constraints = _merge_constraints(scene_constraints, actual_ground_truth_mass, tracked_mass_object(template))
+    actual_ground_truth_frictions = _resolve_ground_truth_frictions(template, ground_truth_frictions)
+    friction_object_ids = dynamic_object_indices(template)
+    constraints = _merge_constraints(scene_constraints,
+                                     actual_ground_truth_mass,
+                                     tracked_mass_object(template),
+                                     actual_ground_truth_frictions,
+                                     friction_object_ids)
 
     for scene_idx in 1:n_scenes
         true_trace, = Gen.generate(scene_model, scene_args, constraints)
@@ -191,6 +228,7 @@ function sample_shared_scene_bank(T::Int, sim, template;
             scene_idx = scene_idx,
             true_trace = true_trace,
             ground_truth_mass = _ground_truth_mass_from_trace(true_trace),
+            ground_truth_frictions = _ground_truth_frictions_from_trace(true_trace),
             observed_positions = observed_positions,
             obs = obs,
             collision_time = detect_collision_time(observed_positions)
@@ -292,6 +330,7 @@ function plot_step_runtime_comparison(model_specs;
                                       scene_args_builder=nothing,
                                       scene_constraints=nothing,
                                       ground_truth_mass=nothing,
+                                      ground_truth_frictions=nothing,
                                       particles::Int=30,
                                       rejuv_moves::Int=2,
                                       drift_std::Float64=1.5,
@@ -315,6 +354,7 @@ function plot_step_runtime_comparison(model_specs;
                                                               scene_args_builder=source_args_builder,
                                                               scene_constraints=scene_constraints,
                                                               ground_truth_mass=ground_truth_mass,
+                                                              ground_truth_frictions=ground_truth_frictions,
                                                               seed=seed) : scenes
 
     results = [benchmark_step_runtime(spec, scene_bank, T, sim, template;
@@ -368,6 +408,7 @@ function run_mass_ratio_history_comparison(models;
                                            scene_args_builder=nothing,
                                            scene_constraints=nothing,
                                            ground_truth_mass=nothing,
+                                           ground_truth_frictions=nothing,
                                            particles::Int=30,
                                            rejuv_moves::Int=2,
                                            drift_std::Float64=1.5,
@@ -388,7 +429,12 @@ function run_mass_ratio_history_comparison(models;
                                                                   proposal_drift_std,
                                                                   msc_params)
             actual_ground_truth_mass = _resolve_ground_truth_mass(template, ground_truth_mass)
-            constraints = _merge_constraints(scene_constraints, actual_ground_truth_mass, tracked_mass_object(template))
+            actual_ground_truth_frictions = _resolve_ground_truth_frictions(template, ground_truth_frictions)
+            constraints = _merge_constraints(scene_constraints,
+                                             actual_ground_truth_mass,
+                                             tracked_mass_object(template),
+                                             actual_ground_truth_frictions,
+                                             dynamic_object_indices(template))
             true_trace, = Gen.generate(source_model, source_builder(T, sim, template), constraints)
             observed_positions = observations_from_trace(true_trace)
         end
@@ -397,6 +443,7 @@ function run_mass_ratio_history_comparison(models;
 
     collision_time = observed_positions === nothing ? nothing : detect_collision_time(observed_positions)
     actual_ground_truth_mass = true_trace === nothing ? ground_truth_mass : _ground_truth_mass_from_trace(true_trace)
+    actual_ground_truth_frictions = true_trace === nothing ? ground_truth_frictions : _ground_truth_frictions_from_trace(true_trace)
     results = Vector{NamedTuple}(undef, length(configs))
 
     for (idx, config) in enumerate(configs)
@@ -414,6 +461,7 @@ function run_mass_ratio_history_comparison(models;
         results = results,
         true_trace = true_trace,
         ground_truth_mass = actual_ground_truth_mass,
+        ground_truth_frictions = actual_ground_truth_frictions,
         observed_positions = observed_positions,
         obs = obs,
         collision_time = collision_time
@@ -699,6 +747,128 @@ function plot_mass_ratio_variance_comparison(history_results;
 
     for (idx, ct) in enumerate(collision_times)
         Plots.vline!(p, [ct], label=idx == 1 ? "collision time" : "", lw=2, ls=:dash)
+    end
+
+    return p
+end
+
+function _friction_truth_value(frictions, object_id::Int)
+    frictions === nothing && return nothing
+    if frictions isa AbstractDict
+        return haskey(frictions, object_id) ? Float64(frictions[object_id]) : nothing
+    end
+    return object_id in eachindex(frictions) ? Float64(frictions[object_id]) : nothing
+end
+
+function _friction_history(history, object_id::Int, time_bin_size::Int)
+    time_bin_size >= 1 || error("time_bin_size must be at least 1.")
+    rows = NamedTuple[]
+
+    for h in sort(collect(history); by=h -> h.t)
+        if hasproperty(h, :frictions) && haskey(h.frictions, object_id)
+            friction = h.frictions[object_id]
+            push!(rows, (
+                t = h.t,
+                mean = friction.mean,
+                std = friction.std,
+                q05 = friction.q05,
+                q25 = friction.q25,
+                q75 = friction.q75,
+                q95 = friction.q95
+            ))
+        end
+    end
+
+    if time_bin_size == 1 || isempty(rows)
+        return rows
+    end
+
+    binned = NamedTuple[]
+    first_t = minimum([h.t for h in rows])
+    last_t = maximum([h.t for h in rows])
+
+    for bin_start in first_t:time_bin_size:last_t
+        bin_stop = bin_start + time_bin_size - 1
+        bin_rows = [h for h in rows if bin_start <= h.t <= bin_stop]
+        isempty(bin_rows) && continue
+
+        push!(binned, (
+            t = mean([h.t for h in bin_rows]),
+            mean = mean([h.mean for h in bin_rows]),
+            std = mean([h.std for h in bin_rows]),
+            q05 = mean([h.q05 for h in bin_rows]),
+            q25 = mean([h.q25 for h in bin_rows]),
+            q75 = mean([h.q75 for h in bin_rows]),
+            q95 = mean([h.q95 for h in bin_rows])
+        ))
+    end
+
+    return binned
+end
+
+function plot_friction_history_comparison(history_results;
+                                          object_id::Int,
+                                          collision_time=nothing,
+                                          ground_truth_frictions=nothing,
+                                          use_quantiles::Bool=false,
+                                          time_bin_size::Int=1,
+                                          title::AbstractString="Posterior lateral friction over time")
+    items = hasproperty(history_results, :results) ? history_results.results : history_results
+    items = items isa AbstractVector ? items : [items]
+
+    truth = if ground_truth_frictions !== nothing
+        _friction_truth_value(ground_truth_frictions, object_id)
+    elseif hasproperty(history_results, :ground_truth_frictions)
+        _friction_truth_value(history_results.ground_truth_frictions, object_id)
+    else
+        nothing
+    end
+
+    p = Plots.plot(xlabel="time",
+                   ylabel="lateral friction",
+                   title=title,
+                   legend=:topright)
+
+    plotted_any = false
+    for (idx, item) in enumerate(items)
+        history = _friction_history(_history_value(item), object_id, time_bin_size)
+        isempty(history) && continue
+
+        label = _history_label(item, idx)
+        ts = [h.t for h in history]
+        means = [h.mean for h in history]
+
+        ribbon = if use_quantiles
+            lower = [h.q05 for h in history]
+            upper = [h.q95 for h in history]
+            (means .- lower, upper .- means)
+        else
+            [h.std for h in history]
+        end
+
+        Plots.plot!(p, ts, means;
+                    ribbon=ribbon,
+                    label=label,
+                    lw=3,
+                    marker=:circle,
+                    ms=3)
+        plotted_any = true
+    end
+
+    plotted_any || error("No friction posterior history found for object $object_id.")
+
+    collision_times = if collision_time !== nothing
+        [collision_time]
+    else
+        unique([_history_collision_time(item) for item in items if _history_collision_time(item) !== nothing])
+    end
+
+    for (idx, ct) in enumerate(collision_times)
+        Plots.vline!(p, [ct], label=idx == 1 ? "collision time" : "", lw=2, ls=:dash)
+    end
+
+    if truth !== nothing
+        Plots.hline!(p, [truth]; label="true friction", lw=2, ls=:dot, color=:black)
     end
 
     return p
