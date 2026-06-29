@@ -163,7 +163,7 @@ function run_drift_smoke_test(T::Int, sim, template, drift_std::Float64;
 
     history = drift_inference_with_history((T, sim, template, drift_std), obs, particles, rejuv_moves;
                                            proposal_drift_std=proposal_drift_std)
-    collision_time = detect_collision_time(observed_positions)
+    collision_time = detect_collision_time(true_trace)
 
     return (
         true_trace = true_trace,

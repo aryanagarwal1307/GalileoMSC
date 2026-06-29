@@ -193,7 +193,7 @@ function sample_shared_scene_bank(T::Int, sim, template;
             ground_truth_mass = _ground_truth_mass_from_trace(true_trace),
             observed_positions = observed_positions,
             obs = obs,
-            collision_time = detect_collision_time(observed_positions)
+            collision_time = detect_collision_time(true_trace)
         )
     end
 
@@ -395,7 +395,15 @@ function run_mass_ratio_history_comparison(models;
         obs = make_observations(observed_positions)
     end
 
-    collision_time = observed_positions === nothing ? nothing : detect_collision_time(observed_positions)
+    collision_time = if true_trace !== nothing
+        detect_collision_time(true_trace)
+    elseif observed_positions !== nothing
+        # A caller-supplied observation sequence has no associated simulator
+        # trajectory, so a noise-free collision time cannot be recovered here.
+        detect_collision_time(observed_positions)
+    else
+        nothing
+    end
     actual_ground_truth_mass = true_trace === nothing ? ground_truth_mass : _ground_truth_mass_from_trace(true_trace)
     results = Vector{NamedTuple}(undef, length(configs))
 

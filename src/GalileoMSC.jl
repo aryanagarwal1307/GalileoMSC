@@ -35,6 +35,7 @@ export
     template_mass_ratio,
     mass_constraint,
     observations_from_trace,
+    true_positions_from_trace,
     detect_collision_time,
     trunc_norm,
     object_mass,
@@ -102,6 +103,11 @@ export
     # visualization
     scene_metadata,
     visualize_scene,
-    plot_scene_trajectory
+    plot_scene_trajectory,
+    true_object_positions,
+    particle_object_positions,
+    particle_scene_limits,
+    draw_scene_svg,
+    save_particle_scene_gif
 
 end

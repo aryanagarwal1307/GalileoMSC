@@ -83,7 +83,7 @@ function increment_age(cap::CollisionMSC)
     return CollisionMSC(cap.id, cap.a, cap.b, cap.birth_t, cap.age + 1)
 end
 
-# Calculate a quick bounding box distance between objects #TODO: Could replace with pybullet API
+# AABB separation shared by MSC birth scoring and trace-based collision plots.
 function bounding_box_distance(aabb_a, aabb_b)
     a_min, a_max = aabb_a
     b_min, b_max = aabb_b
@@ -95,6 +95,38 @@ function bounding_box_distance(aabb_a, aabb_b)
     end
 
     return sqrt(sep_sq)
+end
+
+"""
+    detect_collision_time(tr::Gen.Trace; object_indices=nothing, aabb_tolerance=0.0)
+
+Return the first frame at which the noise-free AABBs of the first two selected
+dynamic objects touch or overlap. The trace's stored simulator states are used;
+no sampled observations enter this calculation.
+"""
+function detect_collision_time(tr::Gen.Trace;
+                               object_indices=nothing,
+                               aabb_tolerance::Real=0.0)
+    aabb_tolerance >= 0 || error("aabb_tolerance must be nonnegative")
+
+    states = get_retval(tr)
+    isempty(states) && return nothing
+
+    first_objects = hasproperty(states[1], :objects) ? states[1].objects : states[1]
+    indices = object_indices === nothing ? dynamic_object_indices(first_objects) : collect(object_indices)
+    length(indices) >= 2 || error("Collision detection requires at least two objects.")
+    a, b = indices[1], indices[2]
+
+    for t in eachindex(states)
+        objects = hasproperty(states[t], :objects) ? states[t].objects : states[t]
+        distance = bounding_box_distance(
+            objects.kinematics[a].aabb,
+            objects.kinematics[b].aabb
+        )
+        distance <= aabb_tolerance && return t
+    end
+
+    return nothing
 end
 
 # Sparse normalized birth weights. Choice index 1 is reserved for no_birth;

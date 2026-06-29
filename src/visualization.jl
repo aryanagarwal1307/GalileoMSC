@@ -123,3 +123,254 @@ function plot_scene_trajectory(scene, positions; title::AbstractString="Galileo 
 
     return p
 end
+
+################################################################################
+# Particle trajectory debugger
+################################################################################
+
+const _PARTICLE_SCENE_AXIS_NAMES = Dict(1 => "x", 2 => "y", 3 => "z")
+
+_trajectory_states(trajectory::Gen.Trace) = get_retval(trajectory)
+_trajectory_states(trajectory) = trajectory
+
+function _positions_from_trajectory(trajectory, t::Int; object_indices=nothing)
+    states = _trajectory_states(trajectory)
+    t in axes(states, 1) || throw(BoundsError(states, t))
+
+    if states isa AbstractArray && ndims(states) == 3
+        indices = object_indices === nothing ? axes(states, 2) : object_indices
+        return [collect(@view states[t, object_id, :]) for object_id in indices]
+    end
+
+    state = states[t]
+    objects = hasproperty(state, :objects) ? state.objects : state
+
+    if hasproperty(objects, :kinematics)
+        indices = object_indices === nothing ? dynamic_object_indices(objects) : object_indices
+        return [copy(objects.kinematics[object_id].position) for object_id in indices]
+    elseif state isa AbstractVector
+        # Also accept the repo's `true_positions_from_trace` result.
+        indices = object_indices === nothing ? eachindex(state) : object_indices
+        return [copy(state[object_id]) for object_id in indices]
+    end
+
+    error("Unsupported trajectory state $(typeof(state)); expected a BulletState, MSCState, or position vector.")
+end
+
+"""
+    true_object_positions(true_trajectory, t; object_indices=nothing)
+
+Return the true 3D positions at frame `t` from a stored Galileo trace/state
+trajectory. By default only dynamic objects are returned.
+"""
+true_object_positions(true_trajectory, t::Int; object_indices=nothing) =
+    _positions_from_trajectory(true_trajectory, t; object_indices=object_indices)
+
+function _particle_trajectories_at(particle_trajectories, t::Int)
+    source = hasproperty(particle_trajectories, :history) ? particle_trajectories.history : particle_trajectories
+    hasproperty(source, :traces) && return source.traces
+
+    if source isa AbstractVector && !isempty(source) && hasproperty(source[firstindex(source)], :traces)
+        t in eachindex(source) || throw(BoundsError(source, t))
+        return source[t].traces
+    end
+
+    return source
+end
+
+"""
+    particle_object_positions(particle_trajectories, t; object_indices=nothing)
+
+Return one vector of 3D object positions per particle at frame `t`.
+`particle_trajectories` may be a vector of traces or one of the repo's
+inference-history vectors, whose entries contain `.traces`.
+"""
+function particle_object_positions(particle_trajectories, t::Int; object_indices=nothing)
+    trajectories = _particle_trajectories_at(particle_trajectories, t)
+    return [
+        _positions_from_trajectory(trajectory, t; object_indices=object_indices)
+        for trajectory in trajectories
+    ]
+end
+
+function _trajectory_frame_count(trajectory)
+    states = _trajectory_states(trajectory)
+    return size(states, 1)
+end
+
+function _padded_axis_limits(values::AbstractVector{<:Real}, padding::Real)
+    lo, hi = extrema(values)
+    span = hi - lo
+    margin = span == 0 ? max(abs(lo) * 0.1, 0.5) : max(Float64(padding), 0.08 * span)
+    return (lo - margin, hi + margin)
+end
+
+"""
+    particle_scene_limits(true_trajectory, particle_trajectories;
+                          plane=(1, 3), object_indices=nothing, padding=0.35)
+
+Compute fixed limits over the entire true and particle histories. The default
+`(1, 3)` plane is the x-z side view used by the ramp collision scene.
+"""
+function particle_scene_limits(true_trajectory, particle_trajectories;
+                               plane::Tuple{Int,Int}=(1, 3),
+                               object_indices=nothing,
+                               padding::Real=0.35)
+    all(axis -> axis in 1:3, plane) || error("plane axes must be in 1:3")
+    plane[1] != plane[2] || error("plane axes must be distinct")
+    padding >= 0 || error("padding must be nonnegative")
+
+    xs = Float64[]
+    ys = Float64[]
+    T = _trajectory_frame_count(true_trajectory)
+
+    for t in 1:T
+        true_positions = true_object_positions(true_trajectory, t; object_indices=object_indices)
+        particle_positions = particle_object_positions(particle_trajectories, t; object_indices=object_indices)
+        for position in Iterators.flatten((true_positions, Iterators.flatten(particle_positions)))
+            push!(xs, Float64(position[plane[1]]))
+            push!(ys, Float64(position[plane[2]]))
+        end
+    end
+
+    isempty(xs) && error("No object positions were found for the particle scene.")
+    return (xlim=_padded_axis_limits(xs, padding), ylim=_padded_axis_limits(ys, padding))
+end
+
+"""
+    draw_scene_svg(true_trajectory, particle_trajectories, t;
+                   show_particles=true, limits=nothing, collision_time=nothing,
+                   plane=(1, 3), object_indices=nothing)
+
+Draw a lightweight, fixed-axis 2D particle-debugging view. True objects 1 and
+2 are dark blue and orange; their particle predictions are light blue and
+light orange respectively.
+Plots uses SVG output when this value is displayed in Pluto.
+"""
+function draw_scene_svg(true_trajectory, particle_trajectories, t::Int;
+                        show_particles::Bool=true,
+                        limits=nothing,
+                        collision_time=nothing,
+                        plane::Tuple{Int,Int}=(1, 3),
+                        object_indices=nothing)
+    T = _trajectory_frame_count(true_trajectory)
+    t in 1:T || throw(BoundsError(1:T, t))
+    fixed_limits = limits === nothing ?
+        particle_scene_limits(true_trajectory, particle_trajectories;
+                              plane=plane, object_indices=object_indices) : limits
+    true_positions = true_object_positions(true_trajectory, t; object_indices=object_indices)
+    length(true_positions) >= 2 || error("Particle scene visualization requires two true objects.")
+
+    collision_suffix = collision_time === nothing ? "" : "  |  collision t=$(collision_time)"
+    p = Plots.plot(
+        ;
+        xlim=fixed_limits.xlim,
+        ylim=fixed_limits.ylim,
+        aspect_ratio=:equal,
+        xlabel="$(_PARTICLE_SCENE_AXIS_NAMES[plane[1]]) position",
+        ylabel="$(_PARTICLE_SCENE_AXIS_NAMES[plane[2]]) position",
+        title="Particle scene — t=$t / $T$collision_suffix",
+        legend=:topright,
+        grid=true,
+        size=(700, 420),
+        fmt=:svg
+    )
+
+    true_colors = (:steelblue, :darkorange)
+    true_markers = (:circle, :diamond)
+    for object_index in 1:2
+        position = true_positions[object_index]
+        Plots.scatter!(
+            p,
+            [position[plane[1]]],
+            [position[plane[2]]];
+            label="true object $object_index",
+            color=true_colors[object_index],
+            marker=true_markers[object_index],
+            markerstrokecolor=:black,
+            markerstrokewidth=1.5,
+            markersize=9
+        )
+    end
+
+    if show_particles
+        particle_positions = particle_object_positions(
+            particle_trajectories,
+            t;
+            object_indices=object_indices
+        )
+        particle_colors = ("#79BDF2", "#FFB766")
+
+        # Draw these after the true markers. Before collision the predictions
+        # often coincide exactly, so a small dot on each true marker makes the
+        # otherwise-hidden particles visible without perturbing their positions.
+        for object_index in 1:2
+            positions = [positions[object_index] for positions in particle_positions]
+            isempty(positions) && continue
+            Plots.scatter!(
+                p,
+                [position[plane[1]] for position in positions],
+                [position[plane[2]] for position in positions];
+                label="object $object_index particles",
+                color=particle_colors[object_index],
+                markerstrokewidth=0,
+                markersize=4,
+                alpha=0.55
+            )
+        end
+    end
+
+    if collision_time !== nothing && t == collision_time
+        midpoint = (true_positions[1] .+ true_positions[2]) ./ 2
+        Plots.scatter!(
+            p,
+            [midpoint[plane[1]]],
+            [midpoint[plane[2]]];
+            label="collision",
+            color=:black,
+            marker=:xcross,
+            markersize=10,
+            markerstrokewidth=2
+        )
+    end
+
+    return p
+end
+
+"""
+    save_particle_scene_gif(path, true_trajectory, particle_trajectories;
+                            fps=10, show_particles=true, kwargs...)
+
+Save all frames of `draw_scene_svg` to `path` with one set of fixed axes.
+"""
+function save_particle_scene_gif(path::AbstractString,
+                                 true_trajectory,
+                                 particle_trajectories;
+                                 fps::Real=10,
+                                 show_particles::Bool=true,
+                                 limits=nothing,
+                                 plane::Tuple{Int,Int}=(1, 3),
+                                 object_indices=nothing,
+                                 collision_time=nothing)
+    fps > 0 || error("fps must be positive")
+    fixed_limits = limits === nothing ?
+        particle_scene_limits(true_trajectory, particle_trajectories;
+                              plane=plane, object_indices=object_indices) : limits
+    animation = Plots.Animation()
+
+    for t in 1:_trajectory_frame_count(true_trajectory)
+        frame_plot = draw_scene_svg(
+            true_trajectory,
+            particle_trajectories,
+            t;
+            show_particles=show_particles,
+            limits=fixed_limits,
+            collision_time=collision_time,
+            plane=plane,
+            object_indices=object_indices
+        )
+        Plots.frame(animation, frame_plot)
+    end
+
+    return Plots.gif(animation, path; fps=fps)
+end

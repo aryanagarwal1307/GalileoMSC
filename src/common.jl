@@ -3,7 +3,7 @@
 ################################################################################
 
 @gen function observe(state::RigidBodyState)
-    position ~ broadcasted_normal(state.position, 0.1)
+    position ~ broadcasted_normal(state.position, 0.25)
     return position
 end
 
@@ -147,15 +147,38 @@ function observations_from_trace(tr::Gen.Trace; chain_addr::Symbol=:states, obje
     return out
 end
 
+"""
+    true_positions_from_trace(tr; object_indices=nothing)
+
+Extract noise-free object positions from the simulator states returned by a
+trace. This is distinct from `observations_from_trace`, which extracts the
+noisy position choices sampled by `observe`.
+"""
+function true_positions_from_trace(tr::Gen.Trace; object_indices=nothing)
+    states = get_retval(tr)
+    isempty(states) && return Any[]
+
+    first_objects = hasproperty(states[1], :objects) ? states[1].objects : states[1]
+    indices = object_indices === nothing ? dynamic_object_indices(first_objects) : object_indices
+    out = Vector{Any}(undef, length(states))
+
+    for t in eachindex(states)
+        objects = hasproperty(states[t], :objects) ? states[t].objects : states[t]
+        out[t] = [copy(objects.kinematics[object_id].position) for object_id in indices]
+    end
+
+    return out
+end
+
 ################################################################################
 # Shared summaries
 ################################################################################
 
-function detect_collision_time(observed_positions; threshold=0.25)
-    T = length(observed_positions)
+function detect_collision_time(positions; threshold=0.25)
+    T = length(positions)
     for t in 1:T
-        p1 = observed_positions[t][1]
-        p2 = observed_positions[t][2]
+        p1 = positions[t][1]
+        p2 = positions[t][2]
         d = norm(p1 .- p2)
         if d < threshold
             return t

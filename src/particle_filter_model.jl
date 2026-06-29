@@ -191,7 +191,7 @@ function run_history_smoke_test(T::Int, sim, template; particles=30, rejuv_moves
     obs = make_observations(observed_positions)
 
     history = inference_with_history((T, sim, template), obs, particles, rejuv_moves)
-    collision_time = detect_collision_time(observed_positions)
+    collision_time = detect_collision_time(true_trace)
 
     return (
         true_trace = true_trace,
