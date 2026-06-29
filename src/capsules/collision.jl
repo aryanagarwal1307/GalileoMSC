@@ -3,7 +3,8 @@
 ################################################################################
 
 # Helper to calculate collision birth and death probability
-function collision_helper(objects::BulletState, a::Int, b::Int, params::MSCParams)
+function collision_helper(objects::BulletState, a::Int, b::Int, params::MSCParams;
+                          surface_gap::Union{Nothing,Float64}=nothing)
     # Extract kinematic properties from the bullet state
     ka = objects.kinematics[a]
     kb = objects.kinematics[b]
@@ -25,12 +26,9 @@ function collision_helper(objects::BulletState, a::Int, b::Int, params::MSCParam
     # Positive means the surface gap is shrinking.
     v_closing = -(dvx * dx + dvy * dy + dvz * dz) * inv_distance
 
-    # Surface gap using bounding-sphere radii from the current AABBs.
-    radius_a = norm(ka.aabb[2] .- ka.aabb[1]) / 2
-    radius_b = norm(kb.aabb[2] .- kb.aabb[1]) / 2
-    R_sum = radius_a + radius_b
-
-    gap = distance - R_sum
+    # AABB separation is exact for axis-aligned boxes and tighter than the
+    # previous diagonal bounding-sphere approximation.
+    gap = isnothing(surface_gap) ? bounding_box_distance(ka.aabb, kb.aabb) : surface_gap
 
     # Constant velocity time to contact 
     if gap > 0.0 && v_closing > params.birth_v_min
@@ -138,7 +136,7 @@ function collision_birth_weight(st::MSCState, a::Int, b::Int, params::MSCParams,
 
     aabb_distance = bounding_box_distance(st.objects.kinematics[a].aabb, st.objects.kinematics[b].aabb)
     if aabb_distance <= params.birth_aabb_window
-        features = collision_helper(st.objects, a, b, params)
+        features = collision_helper(st.objects, a, b, params; surface_gap=aabb_distance)
         return max(Float64(features.birth_prob), default_weight)
     end
 
