@@ -21,7 +21,7 @@ begin
     T = 150
     particles = 20
     rejuv_moves = 1
-    true_mass_ratio = 1.75
+    true_mass_ratio = 1.8
     time_bin_size = 10
     rng_seed = 11
 end
