@@ -20,12 +20,13 @@ begin
     Revise.revise()
     selected_models = [:particle_filter, :drift, :msc]
     T = 120
+    n_runs = 5
+    n_scenes = 1
     particles = 30
     rejuv_moves = 1
     drift_std = 1.0
     proposal_drift_std = 1.0
     true_mass_ratio = 1.75
-    time_bin_size = 3
 end
 
 # ╔═╡ 83f320e0-8bf0-4373-9fc8-4ff0f2ff8f4b
@@ -41,7 +42,8 @@ runtime_cmp = plot_step_runtime_comparison(
     T = T,
     sim = scene.sim,
     template = scene.init_state,
-    n_scenes = 5,
+    n_scenes = n_scenes,
+    n_runs = n_runs,
     scene_model = :particle_filter,
     ground_truth_mass = true_mass_ratio,
     particles = particles,
@@ -61,29 +63,6 @@ runtime_cmp.plot
 # ╔═╡ 6ea7e06b-6693-4150-92c2-993c26fb098d
 timing_spec(:msc).label
 
-# ╔═╡ f9a81c75-e5ad-40c8-b590-4ae5fceacb34
-# ╠═╡ disabled = true
-#=╠═╡
-mass_cmp = run_mass_ratio_history_comparison(
-    selected_models;
-    T = T,
-    sim = scene.sim,
-    template = scene.init_state,
-    scene_model = :particle_filter,
-    ground_truth_mass = true_mass_ratio,
-    particles = particles,
-    rejuv_moves = rejuv_moves,
-    drift_std = drift_std,
-    seed = 11
-);
-  ╠═╡ =#
-
-# ╔═╡ a8a011f4-3382-4d39-8df0-fc64e96e95ea
-# ╠═╡ disabled = true
-#=╠═╡
-plot_mass_ratio_history_comparison(mass_cmp; time_bin_size=time_bin_size)
-  ╠═╡ =#
-
 # ╔═╡ Cell order:
 # ╠═7bcde7f4-0d2b-4bd6-a8e8-19b81b7f2f10
 # ╠═c0d50c0e-578f-48c6-a145-59ab2699dc0d
@@ -92,5 +71,3 @@ plot_mass_ratio_history_comparison(mass_cmp; time_bin_size=time_bin_size)
 # ╠═8932b855-87c4-4f6a-8f0f-7bb39cd127b1
 # ╠═c6c2ef4d-c67d-4c34-a191-8daac383abb5
 # ╠═6ea7e06b-6693-4150-92c2-993c26fb098d
-# ╠═f9a81c75-e5ad-40c8-b590-4ae5fceacb34
-# ╠═a8a011f4-3382-4d39-8df0-fc64e96e95ea

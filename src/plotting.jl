@@ -226,7 +226,10 @@ function _run_timed_filter_pass(spec,
 end
 
 """
-Benchmark per-step runtime for a single timing spec on a fixed scene bank.
+Benchmark normalized per-step runtime for a single timing spec on a fixed scene bank.
+
+Each scene is inferred `n_runs` times with a distinct seed. Timings are divided by
+`particles * rejuv_moves` before being summarized.
 """
 function benchmark_step_runtime(spec,
                                 scenes,
@@ -235,7 +238,12 @@ function benchmark_step_runtime(spec,
                                 template;
                                 particles::Int=30,
                                 rejuv_moves::Int=2,
+                                n_runs::Int=1,
+                                seed::Int=1,
                                 warmup::Bool=true)
+    particles > 0 || error("particles must be positive")
+    n_runs > 0 || error("n_runs must be positive")
+    rejuv_moves > 0 || error("rejuv_moves must be positive to normalize runtime")
     gm_args = spec.gm_args_builder(T, sim, template)
 
     if warmup && !isempty(scenes)
@@ -245,24 +253,31 @@ function benchmark_step_runtime(spec,
                                measure=false)
     end
 
-    step_times_s = Matrix{Float64}(undef, length(scenes), T)
+    step_times_s = Array{Float64}(undef, length(scenes), n_runs, T)
     collision_times = Vector{Union{Nothing,Int}}(undef, length(scenes))
 
     for (scene_idx, scene) in enumerate(scenes)
-        println("Benchmarking $(spec.label), scene $scene_idx / $(length(scenes))", ", collision_time = $(scene.collision_time)")
+        for run_idx in 1:n_runs
+            println(
+                "Benchmarking $(spec.label), scene $scene_idx / $(length(scenes)), run $run_idx / $n_runs",
+                ", collision_time = $(scene.collision_time)"
+            )
 
-        step_times_s[scene_idx, :] = _run_timed_filter_pass(spec, gm_args, scene.obs;
-                                                           particles=particles,
-                                                           rejuv_moves=rejuv_moves,
-                                                           measure=true)
+            Random.seed!(seed + (scene_idx - 1) * n_runs + run_idx - 1)
+            step_times_s[scene_idx, run_idx, :] = _run_timed_filter_pass(spec, gm_args, scene.obs;
+                                                                        particles=particles,
+                                                                        rejuv_moves=rejuv_moves,
+                                                                        measure=true)
+        end
         collision_times[scene_idx] = scene.collision_time
     end
 
-    mean_ms = 1000.0 .* vec(mean(step_times_s; dims=1))
-    std_ms = 1000.0 .* vec(std(step_times_s; dims=1))
-    median_ms = 1000.0 .* [median(view(step_times_s, :, t)) for t in 1:T]
-    q25_ms = 1000.0 .* [quantile(view(step_times_s, :, t), 0.25) for t in 1:T]
-    q75_ms = 1000.0 .* [quantile(view(step_times_s, :, t), 0.75) for t in 1:T]
+    step_times_s ./= particles * rejuv_moves
+    mean_ms = 1000.0 .* vec(mean(step_times_s; dims=(1, 2)))
+    std_ms = 1000.0 .* vec(std(step_times_s; dims=(1, 2)))
+    median_ms = 1000.0 .* [median(view(step_times_s, :, :, t)) for t in 1:T]
+    q25_ms = 1000.0 .* [quantile(vec(view(step_times_s, :, :, t)), 0.25) for t in 1:T]
+    q75_ms = 1000.0 .* [quantile(vec(view(step_times_s, :, :, t)), 0.75) for t in 1:T]
 
     return (
         label = spec.label,
@@ -277,9 +292,9 @@ function benchmark_step_runtime(spec,
 end
 
 """
-Plot per-step inference time for one or more particle-filter models.
+Plot normalized per-step inference time for one or more particle-filter models.
 
-By default the line is the mean over scenes and the ribbon is +/- one std.
+By default the line is the mean over scene-runs and the ribbon is +/- one std.
 If summary=:median, the line is the median and the ribbon is the interquartile range.
 """
 function plot_step_runtime_comparison(model_specs;
@@ -288,6 +303,7 @@ function plot_step_runtime_comparison(model_specs;
                                       template,
                                       scenes=nothing,
                                       n_scenes::Int=10,
+                                      n_runs::Int=1,
                                       scene_model=nothing,
                                       scene_args_builder=nothing,
                                       scene_constraints=nothing,
@@ -320,12 +336,14 @@ function plot_step_runtime_comparison(model_specs;
     results = [benchmark_step_runtime(spec, scene_bank, T, sim, template;
                                       particles=particles,
                                       rejuv_moves=rejuv_moves,
+                                      n_runs=n_runs,
+                                      seed=seed,
                                       warmup=warmup) for spec in specs]
 
     ts = 1:T
     p = Plots.plot(xlabel="filter step t",
-                   ylabel="runtime per step (ms)",
-                   title="Per-step particle-filter runtime",
+                   ylabel="runtime per step (ms / particle / rejuvenation move)",
+                   title="Normalized per-step particle-filter runtime",
                    legend=:topleft)
 
     for result in results
