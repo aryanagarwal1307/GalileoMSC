@@ -77,6 +77,12 @@ function apply_capsule_diffs(objects::BulletState, capsule_diffs::Vector{Capsule
         if latent == :log_mass
             current = new_latents[object_id]
             new_latents[object_id] = update_latents(current, object_mass(current) * exp(delta))
+        elseif latent == :log_lateralFriction
+            current = new_latents[object_id]
+            new_latents[object_id] = update_latents(
+                current;
+                lateralFriction=object_lateral_friction(current) * exp(delta)
+            )
         else
             error("Unsupported MSC diff latent: $latent")
         end
@@ -122,6 +128,14 @@ function summarize_msc_masses(traces, t::Int, params::MSCParams=DEFAULT_MSC_PARA
     )
 end
 
+function summarize_msc_frictions(traces, t::Int)
+    isempty(traces) && return Dict{Int,NamedTuple}()
+    state = get_retval(traces[1])[t]
+    return summarize_frictions(traces, dynamic_object_indices(state.objects)) do tr, object_id
+        object_lateral_friction(get_retval(tr)[t].objects.latents[object_id])
+    end
+end
+
 function _mean_active_capsule_age(capsules::Vector{MSC})
     isempty(capsules) && return 0.0
     return mean(Float64[cap.age for cap in capsules])
@@ -150,17 +164,22 @@ function summarize_msc_capsules(traces, t::Int)
     )
 end
 
-function msc_timing_spec(; label="MSC v0", params::MSCParams=DEFAULT_MSC_PARAMS)
+function msc_timing_spec(; label="MSC v0",
+                         params::MSCParams=DEFAULT_MSC_PARAMS,
+                         infer_friction::Bool=true)
     return make_pf_timing_spec(
         label = label,
-        pf_model = msc_model,
+        pf_model = msc_model_for(infer_friction),
         gm_args_builder = (T, sim, template) -> (T, sim, template, params),
         online_args = gm_args -> (t -> (t, gm_args[2:4]...)),
         argdiffs = (UnknownChange(), NoChange(), NoChange(), NoChange()),
         rejuvenate! = function (state, t, particles, rejuv_moves)
             for i in 1:particles, s in 1:rejuv_moves
                 checkpoint = msc_last_clause_checkpoint(state.traces[i], t)
-                state.traces[i], _ = msc_proposal(state.traces[i], checkpoint...)
+                state.traces[i], _ = msc_proposal(
+                    state.traces[i], checkpoint...;
+                    infer_friction=infer_friction
+                )
             end
             return nothing
         end

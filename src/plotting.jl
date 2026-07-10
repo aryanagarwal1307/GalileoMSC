@@ -32,37 +32,49 @@ end
 function _model_config(model_key::Symbol;
                        drift_std::Float64=1.5,
                        proposal_drift_std::Float64=0.25,
-                       msc_params::MSCParams=DEFAULT_MSC_PARAMS)
+                       msc_params::MSCParams=DEFAULT_MSC_PARAMS,
+                       infer_friction::Bool=true)
     if model_key in (:particle_filter, :particlefilter, :pf, :static)
         return (
             key = :particle_filter,
             label = "particle filter",
-            pf_model = particle_filter_model,
+            pf_model = particle_filter_for(infer_friction),
             gm_args_builder = (T, sim, template) -> (T, sim, template),
-            history_runner = inference_with_history,
-            timing_spec = particle_filter_timing_spec(label="particle filter")
+            history_runner = (gm_args, obs, particles, rejuv_moves) ->
+                inference_with_history(gm_args, obs, particles, rejuv_moves;
+                                       infer_friction=infer_friction),
+            timing_spec = particle_filter_timing_spec(
+                label="particle filter", infer_friction=infer_friction
+            )
         )
     elseif model_key in (:drift, :drift_model)
         return (
             key = :drift,
             label = "drift model",
-            pf_model = drift_model,
+            pf_model = drift_model_for(infer_friction),
             gm_args_builder = (T, sim, template) -> (T, sim, template, drift_std),
             history_runner = (gm_args, obs, particles, rejuv_moves) ->
                 drift_inference_with_history(gm_args, obs, particles, rejuv_moves;
-                                             proposal_drift_std=proposal_drift_std),
+                                             proposal_drift_std=proposal_drift_std,
+                                             infer_friction=infer_friction),
             timing_spec = drift_timing_spec(label="drift model",
                                             drift_std=drift_std,
-                                            proposal_drift_std=proposal_drift_std)
+                                            proposal_drift_std=proposal_drift_std,
+                                            infer_friction=infer_friction)
         )
     elseif model_key in (:msc, :msc_model, :collision_msc)
         return (
             key = :msc,
             label = "MSC v0",
-            pf_model = msc_model,
+            pf_model = msc_model_for(infer_friction),
             gm_args_builder = (T, sim, template) -> (T, sim, template, msc_params),
-            history_runner = msc_inference_with_history,
-            timing_spec = msc_timing_spec(label="MSC v0", params=msc_params)
+            history_runner = (gm_args, obs, particles, rejuv_moves) ->
+                msc_inference_with_history(gm_args, obs, particles, rejuv_moves;
+                                           infer_friction=infer_friction),
+            timing_spec = msc_timing_spec(
+                label="MSC v0", params=msc_params,
+                infer_friction=infer_friction
+            )
         )
     else
         error("Unknown model key: $model_key. Use :particle_filter, :drift, or :msc.")
@@ -72,16 +84,19 @@ end
 _model_config(model_key::AbstractString;
               drift_std::Float64=1.5,
               proposal_drift_std::Float64=0.25,
-              msc_params::MSCParams=DEFAULT_MSC_PARAMS) =
+              msc_params::MSCParams=DEFAULT_MSC_PARAMS,
+              infer_friction::Bool=true) =
     _model_config(Symbol(model_key);
                   drift_std=drift_std,
                   proposal_drift_std=proposal_drift_std,
-                  msc_params=msc_params)
+                  msc_params=msc_params,
+                  infer_friction=infer_friction)
 
 function _model_config(config::NamedTuple;
                        drift_std::Float64=1.5,
                        proposal_drift_std::Float64=0.25,
-                       msc_params::MSCParams=DEFAULT_MSC_PARAMS)
+                       msc_params::MSCParams=DEFAULT_MSC_PARAMS,
+                       infer_friction::Bool=true)
     required = (:key, :label, :pf_model, :gm_args_builder, :history_runner, :timing_spec)
     all(key -> haskey(config, key), required) ||
         error("Custom model configs must include: $(join(string.(required), ", ")).")
@@ -91,49 +106,57 @@ end
 function _resolve_model_configs(models;
                                 drift_std::Float64=1.5,
                                 proposal_drift_std::Float64=0.25,
-                                msc_params::MSCParams=DEFAULT_MSC_PARAMS)
+                                msc_params::MSCParams=DEFAULT_MSC_PARAMS,
+                                infer_friction::Bool=true)
     items = models isa AbstractVector ? models : [models]
     return [_model_config(item;
                           drift_std=drift_std,
                           proposal_drift_std=proposal_drift_std,
-                          msc_params=msc_params) for item in items]
+                          msc_params=msc_params,
+                          infer_friction=infer_friction) for item in items]
 end
 
 function timing_spec(model_key;
                      drift_std::Float64=1.5,
                      proposal_drift_std::Float64=0.25,
-                     msc_params::MSCParams=DEFAULT_MSC_PARAMS)
+                     msc_params::MSCParams=DEFAULT_MSC_PARAMS,
+                     infer_friction::Bool=true)
     if model_key isa NamedTuple && haskey(model_key, :pf_model)
         return model_key
     end
     return _model_config(model_key;
                          drift_std=drift_std,
                          proposal_drift_std=proposal_drift_std,
-                         msc_params=msc_params).timing_spec
+                         msc_params=msc_params,
+                         infer_friction=infer_friction).timing_spec
 end
 
 function _resolve_timing_specs(model_specs;
                                drift_std::Float64=1.5,
                                proposal_drift_std::Float64=0.25,
-                               msc_params::MSCParams=DEFAULT_MSC_PARAMS)
+                               msc_params::MSCParams=DEFAULT_MSC_PARAMS,
+                               infer_friction::Bool=true)
     items = model_specs isa AbstractVector ? model_specs : [model_specs]
     return [timing_spec(item;
                         drift_std=drift_std,
                         proposal_drift_std=proposal_drift_std,
-                        msc_params=msc_params) for item in items]
+                        msc_params=msc_params,
+                        infer_friction=infer_friction) for item in items]
 end
 
 function _scene_source_from_arg(scene_model, scene_args_builder, specs,
                                 drift_std::Float64,
                                 proposal_drift_std::Float64,
-                                msc_params::MSCParams)
+                                msc_params::MSCParams,
+                                infer_friction::Bool)
     if scene_model === nothing
         return (specs[1].pf_model, specs[1].gm_args_builder)
     elseif scene_model isa Symbol || scene_model isa AbstractString
         spec = timing_spec(scene_model;
                            drift_std=drift_std,
                            proposal_drift_std=proposal_drift_std,
-                           msc_params=msc_params)
+                           msc_params=msc_params,
+                           infer_friction=infer_friction)
         return (spec.pf_model, spec.gm_args_builder)
     else
         isnothing(scene_args_builder) &&
@@ -142,12 +165,15 @@ function _scene_source_from_arg(scene_model, scene_args_builder, specs,
     end
 end
 
-function _merge_constraints(base_constraints, ground_truth_mass, object_id::Int)
+function _merge_constraints(base_constraints, template;
+                            ground_truth_mass=nothing,
+                            ground_truth_frictions=nothing,
+                            infer_friction::Bool=true)
     constraints = base_constraints === nothing ? Gen.choicemap() : base_constraints
-    if ground_truth_mass !== nothing
-        constraints[:latents => :obj => object_id => :mass] = Float64(ground_truth_mass)
-    end
-    return constraints
+    return add_physical_constraints!(constraints, template;
+                                     ground_truth_mass=ground_truth_mass,
+                                     ground_truth_frictions=ground_truth_frictions,
+                                     infer_friction=infer_friction)
 end
 
 function _ground_truth_mass_from_trace(tr::Gen.Trace)
@@ -163,6 +189,29 @@ function _resolve_ground_truth_mass(template, ground_truth_mass)
     return ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
 end
 
+function _resolve_ground_truth_frictions(template, ground_truth_frictions)
+    ground_truth_frictions === nothing && return template_lateral_frictions(template)
+    if ground_truth_frictions isa AbstractDict
+        return [Float64(ground_truth_frictions[i]) for i in dynamic_object_indices(template)]
+    end
+    return collect(Float64, ground_truth_frictions)
+end
+
+function _ground_truth_frictions_from_trace(tr::Gen.Trace)
+    template = get_args(tr)[3]
+    try
+        return Dict(
+            object_id => get_choices(tr)[:latents => :obj => object_id => :lateralFriction]
+            for object_id in dynamic_object_indices(template)
+        )
+    catch
+        return Dict(
+            object_id => object_lateral_friction(template.latents[object_id])
+            for object_id in dynamic_object_indices(template)
+        )
+    end
+end
+
 """
 Sample one shared bank of observation sequences.
 
@@ -171,16 +220,23 @@ produce the same scenes. That gives a fair runtime comparison across models.
 """
 function sample_shared_scene_bank(T::Int, sim, template;
                                   n_scenes::Int=10,
-                                  scene_model=particle_filter_model,
+                                  scene_model=nothing,
                                   scene_args_builder=(T, sim, template) -> (T, sim, template),
                                   scene_constraints=nothing,
                                   ground_truth_mass=nothing,
+                                  ground_truth_frictions=nothing,
+                                  infer_friction::Bool=true,
                                   seed::Int=1)
     Random.seed!(seed)
     scenes = Vector{NamedTuple}(undef, n_scenes)
+    scene_model === nothing && (scene_model = particle_filter_for(infer_friction))
     scene_args = scene_args_builder(T, sim, template)
     actual_ground_truth_mass = _resolve_ground_truth_mass(template, ground_truth_mass)
-    constraints = _merge_constraints(scene_constraints, actual_ground_truth_mass, tracked_mass_object(template))
+    actual_ground_truth_frictions = _resolve_ground_truth_frictions(template, ground_truth_frictions)
+    constraints = _merge_constraints(scene_constraints, template;
+                                     ground_truth_mass=actual_ground_truth_mass,
+                                     ground_truth_frictions=actual_ground_truth_frictions,
+                                     infer_friction=infer_friction)
 
     for scene_idx in 1:n_scenes
         true_trace, = Gen.generate(scene_model, scene_args, constraints)
@@ -191,6 +247,7 @@ function sample_shared_scene_bank(T::Int, sim, template;
             scene_idx = scene_idx,
             true_trace = true_trace,
             ground_truth_mass = _ground_truth_mass_from_trace(true_trace),
+            ground_truth_frictions = _ground_truth_frictions_from_trace(true_trace),
             observed_positions = observed_positions,
             obs = obs,
             collision_time = detect_collision_time(true_trace)
@@ -308,6 +365,8 @@ function plot_step_runtime_comparison(model_specs;
                                       scene_args_builder=nothing,
                                       scene_constraints=nothing,
                                       ground_truth_mass=nothing,
+                                      ground_truth_frictions=nothing,
+                                      infer_friction::Bool=true,
                                       particles::Int=30,
                                       rejuv_moves::Int=2,
                                       drift_std::Float64=1.5,
@@ -319,11 +378,13 @@ function plot_step_runtime_comparison(model_specs;
     specs = _resolve_timing_specs(model_specs;
                                   drift_std=drift_std,
                                   proposal_drift_std=proposal_drift_std,
-                                  msc_params=msc_params)
+                                  msc_params=msc_params,
+                                  infer_friction=infer_friction)
     source_model, source_args_builder = _scene_source_from_arg(scene_model, scene_args_builder, specs,
                                                                drift_std,
                                                                proposal_drift_std,
-                                                               msc_params)
+                                                               msc_params,
+                                                               infer_friction)
 
     scene_bank = isnothing(scenes) ? sample_shared_scene_bank(T, sim, template;
                                                               n_scenes=n_scenes,
@@ -331,6 +392,8 @@ function plot_step_runtime_comparison(model_specs;
                                                               scene_args_builder=source_args_builder,
                                                               scene_constraints=scene_constraints,
                                                               ground_truth_mass=ground_truth_mass,
+                                                              ground_truth_frictions=ground_truth_frictions,
+                                                              infer_friction=infer_friction,
                                                               seed=seed) : scenes
 
     results = [benchmark_step_runtime(spec, scene_bank, T, sim, template;
@@ -386,6 +449,8 @@ function run_mass_ratio_history_comparison(models;
                                            scene_args_builder=nothing,
                                            scene_constraints=nothing,
                                            ground_truth_mass=nothing,
+                                           ground_truth_frictions=nothing,
+                                           infer_friction::Bool=true,
                                            particles::Int=30,
                                            rejuv_moves::Int=2,
                                            drift_std::Float64=1.5,
@@ -395,7 +460,8 @@ function run_mass_ratio_history_comparison(models;
     configs = _resolve_model_configs(models;
                                      drift_std=drift_std,
                                      proposal_drift_std=proposal_drift_std,
-                                     msc_params=msc_params)
+                                     msc_params=msc_params,
+                                     infer_friction=infer_friction)
 
     true_trace = nothing
     if obs === nothing
@@ -404,9 +470,14 @@ function run_mass_ratio_history_comparison(models;
             source_model, source_builder = _scene_source_from_arg(scene_model, scene_args_builder, [configs[1].timing_spec],
                                                                   drift_std,
                                                                   proposal_drift_std,
-                                                                  msc_params)
+                                                                  msc_params,
+                                                                  infer_friction)
             actual_ground_truth_mass = _resolve_ground_truth_mass(template, ground_truth_mass)
-            constraints = _merge_constraints(scene_constraints, actual_ground_truth_mass, tracked_mass_object(template))
+            actual_ground_truth_frictions = _resolve_ground_truth_frictions(template, ground_truth_frictions)
+            constraints = _merge_constraints(scene_constraints, template;
+                                             ground_truth_mass=actual_ground_truth_mass,
+                                             ground_truth_frictions=actual_ground_truth_frictions,
+                                             infer_friction=infer_friction)
             true_trace, = Gen.generate(source_model, source_builder(T, sim, template), constraints)
             observed_positions = observations_from_trace(true_trace)
         end
@@ -423,6 +494,12 @@ function run_mass_ratio_history_comparison(models;
         nothing
     end
     actual_ground_truth_mass = true_trace === nothing ? ground_truth_mass : _ground_truth_mass_from_trace(true_trace)
+    actual_ground_truth_frictions = if true_trace === nothing
+        values = _resolve_ground_truth_frictions(template, ground_truth_frictions)
+        Dict(zip(dynamic_object_indices(template), values))
+    else
+        _ground_truth_frictions_from_trace(true_trace)
+    end
     results = Vector{NamedTuple}(undef, length(configs))
 
     for (idx, config) in enumerate(configs)
@@ -440,6 +517,8 @@ function run_mass_ratio_history_comparison(models;
         results = results,
         true_trace = true_trace,
         ground_truth_mass = actual_ground_truth_mass,
+        ground_truth_frictions = actual_ground_truth_frictions,
+        infer_friction = infer_friction,
         observed_positions = observed_positions,
         obs = obs,
         collision_time = collision_time
@@ -727,6 +806,95 @@ function plot_mass_ratio_variance_comparison(history_results;
         Plots.vline!(p, [ct], label=idx == 1 ? "collision time" : "", lw=2, ls=:dash)
     end
 
+    return p
+end
+
+function _friction_truth(frictions, object_id::Int)
+    frictions === nothing && return nothing
+    if frictions isa AbstractDict
+        return get(frictions, object_id, nothing)
+    end
+    return object_id in eachindex(frictions) ? frictions[object_id] : nothing
+end
+
+function _friction_history(history, object_id::Int, time_bin_size::Int)
+    rows = [(
+        t = h.t,
+        mean = h.frictions[object_id].mean,
+        std = h.frictions[object_id].std,
+        q05 = h.frictions[object_id].q05,
+        q25 = h.frictions[object_id].q25,
+        q75 = h.frictions[object_id].q75,
+        q95 = h.frictions[object_id].q95
+    ) for h in history if hasproperty(h, :frictions) && haskey(h.frictions, object_id)]
+
+    time_bin_size == 1 && return rows
+    isempty(rows) && return rows
+
+    binned = NamedTuple[]
+    for bin_start in first(rows).t:time_bin_size:last(rows).t
+        bin_rows = [h for h in rows if bin_start <= h.t < bin_start + time_bin_size]
+        isempty(bin_rows) && continue
+        push!(binned, (
+            t = mean([h.t for h in bin_rows]),
+            mean = mean([h.mean for h in bin_rows]),
+            std = mean([h.std for h in bin_rows]),
+            q05 = mean([h.q05 for h in bin_rows]),
+            q25 = mean([h.q25 for h in bin_rows]),
+            q75 = mean([h.q75 for h in bin_rows]),
+            q95 = mean([h.q95 for h in bin_rows])
+        ))
+    end
+    return binned
+end
+
+function plot_friction_history_comparison(history_results;
+                                          object_id::Int,
+                                          collision_time=nothing,
+                                          ground_truth_frictions=nothing,
+                                          use_quantiles::Bool=false,
+                                          time_bin_size::Int=1,
+                                          title::AbstractString="Posterior lateral friction over time")
+    time_bin_size >= 1 || error("time_bin_size must be at least 1.")
+    items = hasproperty(history_results, :results) ? history_results.results : history_results
+    items = items isa AbstractVector ? items : [items]
+    truth_source = ground_truth_frictions === nothing &&
+                   hasproperty(history_results, :ground_truth_frictions) ?
+                   history_results.ground_truth_frictions : ground_truth_frictions
+
+    p = Plots.plot(xlabel="time", ylabel="lateral friction",
+                   title=title, legend=:topright)
+    plotted = false
+
+    for (idx, item) in enumerate(items)
+        history = _friction_history(_history_value(item), object_id, time_bin_size)
+        isempty(history) && continue
+        means = [h.mean for h in history]
+        ribbon = if use_quantiles
+            lower = [h.q05 for h in history]
+            upper = [h.q95 for h in history]
+            (means .- lower, upper .- means)
+        else
+            [h.std for h in history]
+        end
+        Plots.plot!(p, [h.t for h in history], means;
+                    ribbon=ribbon, label=_history_label(item, idx),
+                    lw=3, marker=:circle, ms=3)
+        plotted = true
+    end
+
+    plotted || error("No friction posterior history found for object $object_id.")
+    collision_times = collision_time === nothing ?
+        unique([_history_collision_time(item) for item in items
+                if _history_collision_time(item) !== nothing]) : [collision_time]
+    for (idx, ct) in enumerate(collision_times)
+        Plots.vline!(p, [ct], label=idx == 1 ? "collision time" : "",
+                     lw=2, ls=:dash)
+    end
+
+    truth = _friction_truth(truth_source, object_id)
+    truth === nothing || Plots.hline!(p, [truth]; label="true friction",
+                                      lw=2, ls=:dot, color=:black)
     return p
 end
 

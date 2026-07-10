@@ -101,9 +101,10 @@ end
 
 # Pick the per-capsule clause. #TODO: this can porbably be a capsule property
 function msc_clause_branch(cap::MSC)
-    cap isa CollisionMSC && return :collision
     error("Unknown capsule type: $(typeof(cap))")
 end
+
+msc_clause_branch(::CollisionMSC) = :collision
 
 # Switch combinator for active capsule clauses.
 const msc_capsule_clause = Gen.Switch(
@@ -150,7 +151,7 @@ const msc_chain = Gen.Unfold(msc_physics_step)
 # Complete MSC model code
 @gen (static) function msc_model(T::Int, sim::BulletSim, template::BulletState, params::MSCParams)
     # Sample latents from the prior
-    latents ~ prior(template.latents)
+    latents ~ prior(template.latents, params.tracked_mass_object)
 
     # Set a template for initial scene
     init_objects = Accessors.setproperties(template; latents=latents)
@@ -164,11 +165,19 @@ const msc_chain = Gen.Unfold(msc_physics_step)
     return states
 end
 
+@gen (static) function msc_mass_model(T::Int, sim::BulletSim,
+                                      template::BulletState, params::MSCParams)
+    latents ~ mass_prior(template.latents, params.tracked_mass_object)
+    init_objects = Accessors.setproperties(template; latents=latents)
+    init_state = initial_msc_state(init_objects, params)
+    states ~ msc_chain(T, init_state, sim, params)
+    return states
+end
+
 ################################################################################
 # Rejuvenation proposal for MSC v0
 ################################################################################
 
-# Get the last point in time where an MSC clause sampled a latent.
 function msc_last_clause_checkpoint(tr::Gen.Trace, t::Int)
     states = get_retval(tr)
     state = states[min(t, length(states))]
@@ -179,23 +188,79 @@ msc_last_mass_checkpoint(tr::Gen.Trace, t::Int) = msc_last_clause_checkpoint(tr,
 
 @gen function msc_initial_mass_proposal(tr::Gen.Trace, object_id::Int)
     choices = get_choices(tr)
-    prev_mass = choices[:latents => :obj => object_id => :mass]
-    mass = {:latents => :obj => object_id => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
+    previous = choices[:latents => :obj => object_id => :mass]
+    mass = {:latents => :obj => object_id => :mass} ~
+        trunc_norm(previous, 1.0, 0.0, Inf)
     return mass
 end
 
+@gen function msc_initial_latents_proposal(tr::Gen.Trace,
+                                           mass_object_id::Int,
+                                           friction_object_ids::Vector{Int})
+    choices = get_choices(tr)
+    previous = choices[:latents => :obj => mass_object_id => :mass]
+    mass = {:latents => :obj => mass_object_id => :mass} ~
+        trunc_norm(previous, 1.0, 0.0, Inf)
+
+    for object_id in friction_object_ids
+        previous = choices[:latents => :obj => object_id => :lateralFriction]
+        lateralFriction = {:latents => :obj => object_id => :lateralFriction} ~
+            trunc_norm(previous, FRICTION_PROPOSAL_STD,
+                       FRICTION_PRIOR_LOW, FRICTION_PRIOR_HIGH)
+    end
+
+    return mass
+end
+
+@gen function msc_initial_friction_proposal(tr::Gen.Trace,
+                                            friction_object_ids::Vector{Int})
+    choices = get_choices(tr)
+    frictions = Vector{Float64}(undef, length(friction_object_ids))
+
+    for (i, object_id) in enumerate(friction_object_ids)
+        previous = choices[:latents => :obj => object_id => :lateralFriction]
+        frictions[i] = {:latents => :obj => object_id => :lateralFriction} ~
+            trunc_norm(previous, FRICTION_PROPOSAL_STD,
+                       FRICTION_PRIOR_LOW, FRICTION_PRIOR_HIGH)
+    end
+
+    return frictions
+end
+
 # Create an MSC-aware rejuvenation move by resampling a clause subtree.
-function msc_proposal_selection(tr::Gen.Trace, checkpoint_t::Int, msc_id::Int)
+function msc_proposal_selection(checkpoint_t::Int, msc_id::Int)
     return Gen.select(:states => checkpoint_t => :msc_switch => msc_id => :clause)
 end
 
-function msc_proposal(tr::Gen.Trace, checkpoint_t::Int, msc_id::Int)
-    if checkpoint_t == 0
-        params = get_args(tr)[4]::MSCParams
-        object_id = tracked_mass_object(get_args(tr)[3], params.tracked_mass_object)
-        return Gen.mh(tr, msc_initial_mass_proposal, (object_id,))
+msc_model_for(infer_friction::Bool) = infer_friction ? msc_model : msc_mass_model
+
+function msc_initial_latent_move(tr::Gen.Trace; infer_friction::Bool=true)
+    template = get_args(tr)[3]
+    params = get_args(tr)[4]::MSCParams
+    mass_object_id = tracked_mass_object(template, params.tracked_mass_object)
+
+    if infer_friction
+        friction_object_ids = dynamic_object_indices(template)
+        return Gen.mh(tr, msc_initial_latents_proposal,
+                      (mass_object_id, friction_object_ids))
+    else
+        return Gen.mh(tr, msc_initial_mass_proposal, (mass_object_id,))
     end
-    return Gen.mh(tr, msc_proposal_selection(tr, checkpoint_t, msc_id))
+end
+
+function msc_proposal(tr::Gen.Trace, checkpoint_t::Int, msc_id::Int;
+                      infer_friction::Bool=true)
+    if checkpoint_t == 0
+        return msc_initial_latent_move(tr; infer_friction=infer_friction)
+    end
+
+    if infer_friction
+        friction_object_ids = dynamic_object_indices(get_args(tr)[3])
+        tr, _ = Gen.mh(tr, msc_initial_friction_proposal,
+                       (friction_object_ids,))
+    end
+
+    return Gen.mh(tr, msc_proposal_selection(checkpoint_t, msc_id))
 end
 
 ################################################################################
@@ -205,10 +270,12 @@ end
 function msc_inference_procedure(gm_args::Tuple,
                                  obs::Vector{Gen.ChoiceMap},
                                  particles::Int=20,
-                                 rejuv_moves::Int=1)
+                                 rejuv_moves::Int=1;
+                                 infer_friction::Bool=true)
 
     get_args(t) = (t, gm_args[2:4]...)
-    state = Gen.initialize_particle_filter(msc_model, get_args(0), EmptyChoiceMap(), particles)
+    pf_model = msc_model_for(infer_friction)
+    state = Gen.initialize_particle_filter(pf_model, get_args(0), EmptyChoiceMap(), particles)
     argdiffs = (UnknownChange(), NoChange(), NoChange(), NoChange())
 
     for (t, o) in enumerate(obs)
@@ -217,7 +284,10 @@ function msc_inference_procedure(gm_args::Tuple,
 
         for i in 1:particles, s in 1:rejuv_moves
             checkpoint = msc_last_clause_checkpoint(state.traces[i], t)
-            state.traces[i], _ = msc_proposal(state.traces[i], checkpoint...)
+            state.traces[i], _ = msc_proposal(
+                state.traces[i], checkpoint...;
+                infer_friction=infer_friction
+            )
         end
     end
 
@@ -227,11 +297,13 @@ end
 function msc_inference_with_history(gm_args::Tuple,
                                     obs::Vector{Gen.ChoiceMap},
                                     particles::Int=20,
-                                    rejuv_moves::Int=1)
+                                    rejuv_moves::Int=1;
+                                    infer_friction::Bool=true)
 
     get_args(t) = (t, gm_args[2:4]...)
     params = gm_args[4]::MSCParams
-    state = Gen.initialize_particle_filter(msc_model, get_args(0), EmptyChoiceMap(), particles)
+    pf_model = msc_model_for(infer_friction)
+    state = Gen.initialize_particle_filter(pf_model, get_args(0), EmptyChoiceMap(), particles)
     argdiffs = (UnknownChange(), NoChange(), NoChange(), NoChange())
 
     history = Vector{NamedTuple}(undef, length(obs))
@@ -243,7 +315,10 @@ function msc_inference_with_history(gm_args::Tuple,
         for i in 1:particles
             for s in 1:rejuv_moves
                 checkpoint = msc_last_clause_checkpoint(state.traces[i], t)
-                state.traces[i], _ = msc_proposal(state.traces[i], checkpoint...)
+                state.traces[i], _ = msc_proposal(
+                    state.traces[i], checkpoint...;
+                    infer_friction=infer_friction
+                )
             end
             capsules = get_retval(state.traces[i])[t].capsules
             #println("t=$(t), particle=$(i), capsules=$(capsules), log_score=$(Gen.get_score(state.traces[i]))")
@@ -269,6 +344,7 @@ function msc_inference_with_history(gm_args::Tuple,
             capsule_mean_death_count = capsule_summary.capsule_mean_death_count,
             capsule_mean_age = capsule_summary.capsule_mean_age,
             capsule_mean_birth_probability = capsule_summary.capsule_mean_birth_probability,
+            frictions = infer_friction ? summarize_msc_frictions(current_traces, t) : Dict{Int,NamedTuple}(),
             traces = current_traces
         )
     end

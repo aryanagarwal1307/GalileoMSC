@@ -15,11 +15,19 @@ end
 const sm_chain = Gen.Unfold(particle_filter_physics_step)
 
 @gen (static) function particle_filter_model(T::Int, sim::BulletSim, template::BulletState)
-    # distribution over mass and restitution for objects from the prior
-    latents ~ prior(template.latents)
+    # Sample physical latents once, then keep them fixed through the rollout.
+    latents ~ prior(template.latents, tracked_mass_object(template))
     init_state = Accessors.setproperties(template; latents=latents)
 
     # simulate `T` timesteps; kind of like a for-loop
+    states ~ sm_chain(T, init_state, sim)
+    return states
+end
+
+@gen (static) function particle_filter_mass_model(T::Int, sim::BulletSim, template::BulletState)
+    object_id = tracked_mass_object(template)
+    latents ~ mass_prior(template.latents, object_id)
+    init_state = Accessors.setproperties(template; latents=latents)
     states ~ sm_chain(T, init_state, sim)
     return states
 end
@@ -30,24 +38,45 @@ const model = particle_filter_model
 # Rejuvenation proposal for static mass model
 ################################################################################
 
-"""
-This proposal function implements a random walk for the ramp object's mass.
-
-The proposal is truncated so the sampled mass stays physically valid.
-"""
-@gen function particle_filter_proposal(tr::Gen.Trace)
+@gen function particle_filter_mass_proposal(tr::Gen.Trace)
     choices = get_choices(tr)
     object_id = tracked_mass_object(get_args(tr)[3])
+    previous = choices[:latents => :obj => object_id => :mass]
+    mass = {:latents => :obj => object_id => :mass} ~
+        trunc_norm(previous, 1.0, 0.0, Inf)
+    return mass
+end
 
-    # Only the tracked dynamic object's mass is random in the prior.
-    prev_mass = choices[:latents => :obj => object_id => :mass]
+@gen function particle_filter_proposal(tr::Gen.Trace)
+    choices = get_choices(tr)
+    template = get_args(tr)[3]
+    object_id = tracked_mass_object(template)
+    previous = choices[:latents => :obj => object_id => :mass]
+    mass = {:latents => :obj => object_id => :mass} ~
+        trunc_norm(previous, 1.0, 0.0, Inf)
 
-    mass = {:latents => :obj => object_id => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
+    for friction_object_id in dynamic_object_indices(template)
+        previous = choices[:latents => :obj => friction_object_id => :lateralFriction]
+        lateralFriction = {:latents => :obj => friction_object_id => :lateralFriction} ~
+            trunc_norm(previous, FRICTION_PROPOSAL_STD,
+                       FRICTION_PRIOR_LOW, FRICTION_PRIOR_HIGH)
+    end
 
     return mass
 end
 
 const proposal = particle_filter_proposal
+
+particle_filter_for(infer_friction::Bool) =
+    infer_friction ? particle_filter_model : particle_filter_mass_model
+
+function particle_filter_move(tr::Gen.Trace; infer_friction::Bool=true)
+    if infer_friction
+        return Gen.mh(tr, particle_filter_proposal, ())
+    else
+        return Gen.mh(tr, particle_filter_mass_proposal, ())
+    end
+end
 
 """
     inference_procedure
@@ -59,13 +88,15 @@ Performs particle filter inference with MH rejuvenation.
 function inference_procedure(gm_args::Tuple,
                              obs::Vector{Gen.ChoiceMap},
                              particles::Int=20,
-                             rejuv_moves::Int=1)
+                             rejuv_moves::Int=1;
+                             infer_friction::Bool=true)
 
     # model arguments are (T, sim, template), and only T changes online
     get_args(t) = (t, gm_args[2:3]...)
 
     # initialize particle filter at t = 0
-    state = Gen.initialize_particle_filter(particle_filter_model, get_args(0), EmptyChoiceMap(), particles)
+    pf_model = particle_filter_for(infer_friction)
+    state = Gen.initialize_particle_filter(pf_model, get_args(0), EmptyChoiceMap(), particles)
 
     # only the first argument (T) changes from step to step
     argdiffs = (UnknownChange(), NoChange(), NoChange())
@@ -80,7 +111,7 @@ function inference_procedure(gm_args::Tuple,
 
         # STEP 3: rejuvenation moves
         for i in 1:particles, s in 1:rejuv_moves
-            state.traces[i], _ = Gen.mh(state.traces[i], particle_filter_proposal, ())
+            state.traces[i], _ = particle_filter_move(state.traces[i]; infer_friction=infer_friction)
         end
     end
 
@@ -120,6 +151,15 @@ function summarize_trace_set(traces)
     )
 end
 
+function summarize_particle_filter_frictions(traces)
+    isempty(traces) && return Dict{Int,NamedTuple}()
+    template = get_args(traces[1])[3]
+    indices = dynamic_object_indices(template)
+    return summarize_frictions(traces, indices) do tr, object_id
+        get_choices(tr)[:latents => :obj => object_id => :lateralFriction]
+    end
+end
+
 ################################################################################
 # Sequential inference with stored history
 ################################################################################
@@ -127,11 +167,13 @@ end
 function inference_with_history(gm_args::Tuple,
                                 obs::Vector{Gen.ChoiceMap},
                                 particles::Int=20,
-                                rejuv_moves::Int=1)
+                                rejuv_moves::Int=1;
+                                infer_friction::Bool=true)
 
     get_args(t) = (t, gm_args[2:3]...)
 
-    state = Gen.initialize_particle_filter(particle_filter_model, get_args(0), EmptyChoiceMap(), particles)
+    pf_model = particle_filter_for(infer_friction)
+    state = Gen.initialize_particle_filter(pf_model, get_args(0), EmptyChoiceMap(), particles)
     argdiffs = (UnknownChange(), NoChange(), NoChange())
 
     history = Vector{NamedTuple}(undef, length(obs))
@@ -141,7 +183,7 @@ function inference_with_history(gm_args::Tuple,
         Gen.maybe_resample!(state, ess_threshold=particles / 2)
 
         for i in 1:particles, s in 1:rejuv_moves
-            state.traces[i], _ = Gen.mh(state.traces[i], particle_filter_proposal, ())
+            state.traces[i], _ = particle_filter_move(state.traces[i]; infer_friction=infer_friction)
         end
 
         current_traces = Gen.sample_unweighted_traces(state, particles)
@@ -155,6 +197,7 @@ function inference_with_history(gm_args::Tuple,
             q75 = summ.q75,
             q05 = summ.q05,
             q95 = summ.q95,
+            frictions = infer_friction ? summarize_particle_filter_frictions(current_traces) : Dict{Int,NamedTuple}(),
             traces = current_traces
         )
     end
@@ -166,13 +209,25 @@ end
 # Synthetic smoke tests
 ################################################################################
 
-function run_smoke_test(T::Int, sim, template; particles=20, rejuv_moves=1, ground_truth_mass=nothing)
+function run_smoke_test(T::Int, sim, template;
+                        particles=20,
+                        rejuv_moves=1,
+                        ground_truth_mass=nothing,
+                        ground_truth_frictions=nothing,
+                        infer_friction::Bool=true)
     true_mass = ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
-    tr, = Gen.generate(particle_filter_model, (T, sim, template), mass_constraint(true_mass, template))
+    true_frictions = ground_truth_frictions === nothing ? template_lateral_frictions(template) : ground_truth_frictions
+    constraints = add_physical_constraints!(Gen.choicemap(), template;
+                                            ground_truth_mass=true_mass,
+                                            ground_truth_frictions=true_frictions,
+                                            infer_friction=infer_friction)
+    pf_model = particle_filter_for(infer_friction)
+    tr, = Gen.generate(pf_model, (T, sim, template), constraints)
     observed_positions = observations_from_trace(tr)
     obs = make_observations(observed_positions)
 
-    traces = inference_procedure((T, sim, template), obs, particles, rejuv_moves)
+    traces = inference_procedure((T, sim, template), obs, particles, rejuv_moves;
+                                 infer_friction=infer_friction)
 
     return (
         true_trace = tr,
@@ -184,13 +239,25 @@ function run_smoke_test(T::Int, sim, template; particles=20, rejuv_moves=1, grou
     )
 end
 
-function run_history_smoke_test(T::Int, sim, template; particles=30, rejuv_moves=2, ground_truth_mass=nothing)
+function run_history_smoke_test(T::Int, sim, template;
+                                particles=30,
+                                rejuv_moves=2,
+                                ground_truth_mass=nothing,
+                                ground_truth_frictions=nothing,
+                                infer_friction::Bool=true)
     true_mass = ground_truth_mass === nothing ? template_mass_ratio(template) : Float64(ground_truth_mass)
-    true_trace, = Gen.generate(particle_filter_model, (T, sim, template), mass_constraint(true_mass, template))
+    true_frictions = ground_truth_frictions === nothing ? template_lateral_frictions(template) : ground_truth_frictions
+    constraints = add_physical_constraints!(Gen.choicemap(), template;
+                                            ground_truth_mass=true_mass,
+                                            ground_truth_frictions=true_frictions,
+                                            infer_friction=infer_friction)
+    pf_model = particle_filter_for(infer_friction)
+    true_trace, = Gen.generate(pf_model, (T, sim, template), constraints)
     observed_positions = observations_from_trace(true_trace)
     obs = make_observations(observed_positions)
 
-    history = inference_with_history((T, sim, template), obs, particles, rejuv_moves)
+    history = inference_with_history((T, sim, template), obs, particles, rejuv_moves;
+                                     infer_friction=infer_friction)
     collision_time = detect_collision_time(true_trace)
 
     return (
@@ -206,16 +273,23 @@ end
 """
 Convenience constructor for the static particle-filter model.
 """
-function particle_filter_timing_spec(; label="particle filter", proposal_fn=particle_filter_proposal)
+function particle_filter_timing_spec(; label="particle filter",
+                                     proposal_fn=nothing,
+                                     infer_friction::Bool=true)
     return make_pf_timing_spec(
         label = label,
-        pf_model = particle_filter_model,
+        pf_model = particle_filter_for(infer_friction),
         gm_args_builder = (T, sim, template) -> (T, sim, template),
         online_args = gm_args -> (t -> (t, gm_args[2:3]...)),
         argdiffs = (UnknownChange(), NoChange(), NoChange()),
         rejuvenate! = function (state, t, particles, rejuv_moves)
             for i in 1:particles, s in 1:rejuv_moves
-                state.traces[i], _ = Gen.mh(state.traces[i], proposal_fn, ())
+                state.traces[i], _ = if proposal_fn === nothing
+                    particle_filter_move(state.traces[i];
+                                         infer_friction=infer_friction)
+                else
+                    Gen.mh(state.traces[i], proposal_fn, ())
+                end
             end
             return nothing
         end
