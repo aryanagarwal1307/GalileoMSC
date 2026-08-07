@@ -6,7 +6,7 @@ Base.@kwdef struct MSCParams
     # Collision Birth Features: 
     birth_gap_max::Float64 = 0.15               # Maximum gap for which objects are 'close'
     birth_gap_scale::Float64 = 0.02             # Gap gate parameter 
-    birth_v_min::Float64 = 0.10                 # Minimum closing speech for which objects are 'approaching'
+    birth_v_min::Float64 = 0.10                 # Minimum closing speed for which objects are 'approaching'
     birth_v_scale::Float64 = 0.02               # Closing speed gate parameter 
     birth_T_contact::Float64 = 0.16             # Contact prediction horizon
     birth_tau_scale::Float64 = 0.04             # Time to contact gate parameter
@@ -14,16 +14,10 @@ Base.@kwdef struct MSCParams
     birth_aabb_window::Float64 = 1.0            # AABB distance window for full birth predicate evaluation
     birth_background_weight::Float64 = 1e-8     # Uniform candidate weight outside the AABB window
 
-    # Object dimensions 
-    obj_dims  = [[0.15, 0.3, 0.075], [0.2,  0.2, 0.1]] # ramp, then table 
-
     # Collision Death Features 
     min_active_steps::Int = 5                   # minimum steps for capsule to be active
     min_age_survival::Float64 = 1.0             # min survival prob early on
     age_decay_steps::Float64 = 9.0              # gradual decay of survival
-    survival_distance_scale::Float64 = 0.45     # scale for near collision
-    death_v_min::Float64 = 0.02                 # velocity parameter 
-    death_v_scale::Float64 = 0.02               # Velocity parameter
 
     no_birth_weight::Float64 = 0.3              # weight of having no capsule births
     collision_mass_drift_std::Float64 = 1.0     # std for active-collision mass drift
@@ -71,7 +65,7 @@ struct MSCState
     objects::BulletState
     # Vector of all active capsules in the scene
     capsules::Vector{MSC}
-    # Statistics for diagnostoc / plotting reasons
+    # Statistics for diagnostics and plotting
     event_stats::MSCEventStats
     # Most recent time/capsule clause that sampled an MSC latent.
     last_clause_checkpoint_t::Int

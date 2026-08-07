@@ -99,7 +99,7 @@ end
     )
 end
 
-# Pick the per-capsule clause. #TODO: this can porbably be a capsule property
+# Pick the per-capsule clause. TODO: this could become a capsule property.
 function msc_clause_branch(cap::MSC)
     cap isa CollisionMSC && return :collision
     error("Unknown capsule type: $(typeof(cap))")
@@ -175,8 +175,6 @@ function msc_last_clause_checkpoint(tr::Gen.Trace, t::Int)
     return (state.last_clause_checkpoint_t, state.last_clause_checkpoint_msc_id)
 end
 
-msc_last_mass_checkpoint(tr::Gen.Trace, t::Int) = msc_last_clause_checkpoint(tr, t)
-
 @gen function msc_initial_mass_proposal(tr::Gen.Trace, object_id::Int)
     choices = get_choices(tr)
     prev_mass = choices[:latents => :obj => object_id => :mass]
@@ -245,8 +243,6 @@ function msc_inference_with_history(gm_args::Tuple,
                 checkpoint = msc_last_clause_checkpoint(state.traces[i], t)
                 state.traces[i], _ = msc_proposal(state.traces[i], checkpoint...)
             end
-            capsules = get_retval(state.traces[i])[t].capsules
-            #println("t=$(t), particle=$(i), capsules=$(capsules), log_score=$(Gen.get_score(state.traces[i]))")
         end
 
         current_traces = Gen.sample_unweighted_traces(state, particles)

@@ -47,6 +47,7 @@ export
     unsafe_fast_categorical,
     # scenes
     ramp,
+    DEFAULT_SCENE_RESTITUTION,
     create_ramp_simulation,
     sample_random_scene,
     simulate_scene_positions,
@@ -108,6 +109,8 @@ export
     particle_object_positions,
     particle_scene_limits,
     draw_scene_svg,
+    bullet_camera_plot,
+    ScenePlaybackSlider,
     save_particle_scene_gif
 
 end

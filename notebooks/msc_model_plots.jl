@@ -26,6 +26,7 @@ begin
     using Plots
     using PlutoUI
     using Gen
+    using Statistics
 end
 
 # ╔═╡ a62867f7-cad0-443b-9135-58cdd6561e06
@@ -34,7 +35,12 @@ begin
     T = 120
     particles = 20
     rejuv_moves = 1
-    true_mass_ratio = 1.8
+    true_mass_ratio = 1.5
+    obj_frictions = (0.05, 0.2)
+    obj_positions = (0.5, 1.5)
+    slope = 0.9
+    tableRampIntersection = 0.0
+    restitution = 0.5
     time_bin_size = 10
     rng_seed = 11
 end
@@ -42,20 +48,25 @@ end
 # ╔═╡ 109177a5-67d9-42b4-8db0-23c9c929894f
 scene = create_ramp_simulation(
     mass_ratio = true_mass_ratio,
-    obj_frictions = (0.3, 0.3),
-    obj_positions = (0.5, 1.5)
+    obj_frictions = obj_frictions,
+    obj_positions = obj_positions,
+    slope = slope,
+    tableRampIntersection = tableRampIntersection,
+    restitution = restitution,
 );
 
 # ╔═╡ 4a1a9a03-6e00-4e8c-8d52-fd8277af218e
 begin
     Revise.revise()
 
-    common_jl = joinpath(dirname(pathof(GalileoMSC)), "common.jl")
-    lines = readlines(common_jl)
-    prior_line = strip(lines[findfirst(line -> occursin("mass ~", line), lines)])
-
-    println("GalileoMSC loaded from: ", pathof(GalileoMSC))
-    println("Prior mass draw: ", prior_line)
+    (
+        package = pathof(GalileoMSC),
+        mass_ratio = scene.metadata.mass_ratio,
+        frictions = scene.metadata.obj_frictions,
+        positions = scene.metadata.obj_positions,
+        slope = scene.metadata.slope,
+        restitution = scene.metadata.restitution,
+    )
 end
 
 # ╔═╡ b9a22540-5d70-47dd-8398-1c8878eef1fb
@@ -73,8 +84,6 @@ mass_and_msc_cmp = run_mass_ratio_history_comparison(
 
 # ╔═╡ 2f029d12-2c25-42ec-b089-db8a6733165c
 begin
-    using Statistics 
-    
     time_window = 50:70
 
     msc_result = only(filter(r -> r.key == :msc, mass_and_msc_cmp.results))
@@ -134,8 +143,7 @@ plot_mass_ratio_history_comparison(
 # ╔═╡ b81746d1-128a-418d-826a-694d1e9d4cc9
 begin
     collision_time = mass_and_msc_cmp.collision_time
-        println("collision time = ", collision_time)
-        collision_time
+    collision_time
 end
 
 # ╔═╡ 74e366ec-8f05-4235-a4e7-b4e17725ee21
@@ -161,10 +169,11 @@ plot_mass_ratio_variance_comparison(
 md"""
 ## Particle trajectory debugger
 
-The x-z side view follows the ramp/collision plane. Dark blue and orange are
-the two true objects; light blue and light orange are their respective MSC
-particle predictions. Before collision the predictions usually overlap because
-the candidate masses have not yet produced different collision outcomes.
+The x-z side view now uses the same static scene geometry as the collision
+diagnostics. Dark blue and orange mark the two true object centres; light blue
+and light orange are their respective MSC particle inferences. Before collision
+the inferences usually overlap because the candidate masses have not yet
+produced different collision outcomes.
 """
 
 # ╔═╡ f3808d50-4d33-4f8a-8aa7-f55093072774
@@ -172,12 +181,17 @@ begin
     true_trajectory = mass_and_msc_cmp.true_trace
     particle_trajectories = msc_result.history
     particle_scene_T = length(particle_trajectories)
-    particle_scene_axes = particle_scene_limits(true_trajectory, particle_trajectories)
+    particle_scene_default_t = collision_time === nothing ? 1 : collision_time
+    particle_scene_axes = particle_scene_limits(
+        true_trajectory,
+        particle_trajectories;
+        scene=scene,
+    )
 end
 
 # ╔═╡ 5fdedfff-8c7e-42e7-b64e-55ad4b261578
 md"""
-Time: $(@bind particle_scene_t Slider(1:particle_scene_T; default=1, show_value=true))
+Time: $(@bind particle_scene_t Slider(1:particle_scene_T; default=particle_scene_default_t, show_value=true))
 
 Show particle predictions: $(@bind show_particles CheckBox(default=true))
 """
@@ -190,7 +204,41 @@ draw_scene_svg(
     show_particles=show_particles,
     limits=particle_scene_axes,
     collision_time=collision_time,
+    scene=scene,
 )
+
+# ╔═╡ 8026dd8e-18d8-4bbb-bd4e-05501378eb51
+md"""
+### Bullet 3D camera
+
+This uses the same off-screen Bullet camera and playback control as the
+collision-geometry notebook. The dark markers are the true object centres;
+the lighter dots are the MSC particles projected through the same camera
+matrices, so they remain registered while the camera moves.
+
+3D timeline: $(@bind bullet_particle_scene_t ScenePlaybackSlider(particle_scene_T; default=particle_scene_default_t, fps=6))
+
+Camera yaw: $(@bind bullet_particle_camera_yaw Slider(-45:5:45; default=0, show_value=true))
+
+Camera pitch: $(@bind bullet_particle_camera_pitch Slider(-60:5:-20; default=-35, show_value=true))
+"""
+
+# ╔═╡ e38e9943-9f08-4106-9ab0-c3f309e52e21
+begin
+    bullet_particle_positions = particle_object_positions(
+        particle_trajectories,
+        bullet_particle_scene_t,
+    )
+    bullet_camera_plot(
+        scene,
+        get_retval(true_trajectory)[bullet_particle_scene_t];
+        frame=bullet_particle_scene_t,
+        particle_positions=bullet_particle_positions,
+        show_particles=show_particles,
+        yaw=bullet_particle_camera_yaw,
+        pitch=bullet_particle_camera_pitch,
+    )
+end
 
 # ╔═╡ 77374e9f-b4fd-4b74-8b76-d6a7ba5a8ed2
 # ╠═╡ disabled = true
@@ -203,20 +251,9 @@ save_particle_scene_gif(
     show_particles=true,
     limits=particle_scene_axes,
     collision_time=collision_time,
+    scene=scene,
 )
   ╠═╡ =#
-
-# ╔═╡ 3ab8ee7b-61f8-4650-aaf5-19e140f5abf0
-begin
-    true_positions = true_positions_from_trace(mass_and_msc_cmp.true_trace)
-    time_to_show = 62
-    visualize_scene(
-        scene;
-        positions=true_positions,
-        frame=time_to_show,
-        title="True scene at T=$time_to_show",
-    )
-end
 
 # ╔═╡ Cell order:
 # ╠═9f5b47fc-1f86-4e7d-8fd0-1600866ef6d5
@@ -234,5 +271,6 @@ end
 # ╠═f3808d50-4d33-4f8a-8aa7-f55093072774
 # ╟─5fdedfff-8c7e-42e7-b64e-55ad4b261578
 # ╠═c5e8d9ec-e79f-49f0-85d1-50c0cd671a90
+# ╟─8026dd8e-18d8-4bbb-bd4e-05501378eb51
+# ╠═e38e9943-9f08-4106-9ab0-c3f309e52e21
 # ╠═77374e9f-b4fd-4b74-8b76-d6a7ba5a8ed2
-# ╠═3ab8ee7b-61f8-4650-aaf5-19e140f5abf0

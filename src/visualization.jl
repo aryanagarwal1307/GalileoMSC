@@ -22,6 +22,14 @@ function _rotated_box_shape(center_x::Real, center_z::Real, width::Real, height:
     return Plots.Shape(xs, zs)
 end
 
+function _ramp_side_shape(metadata)
+    x_min = metadata.ramp_position[1]
+    x_max = x_min + metadata.ramp_dims[1]
+    z_min = metadata.ramp_position[3]
+    z_max = z_min + metadata.ramp_dims[3]
+    return Plots.Shape([x_min, x_min, x_max], [z_min, z_max, z_min])
+end
+
 function _positions_at_frame(positions, frame::Int)
     if positions === nothing
         return nothing
@@ -38,17 +46,18 @@ function _draw_scene_base!(p, metadata)
 
     table_base = _rotated_box_shape(0.0, -(base_dims[3] + table_dims[3]) / 2, base_dims[1], base_dims[3], 0.0)
     table_top = _rotated_box_shape(0.0, -table_dims[3] / 2, table_dims[1], table_dims[3], 0.0)
-    ramp = _rotated_box_shape(
-        metadata.ramp_position[1] + metadata.ramp_dims[1] / 2,
-        metadata.ramp_position[3] + metadata.ramp_dims[3] / 2,
-        metadata.ramp_dims[1],
-        metadata.ramp_dims[3],
-        metadata.ramp_orientation
-    )
+    ramp = _ramp_side_shape(metadata)
+    frame_thickness = 0.05
+    frame_height = 0.25
+    rail_x = metadata.table_dims[1] / 2 + frame_thickness / 2
+    left_rail = _rotated_box_shape(-rail_x, 0.0, frame_thickness, frame_height, 0.0)
+    right_rail = _rotated_box_shape(rail_x, 0.0, frame_thickness, frame_height, 0.0)
 
     Plots.plot!(p, table_base; label="", color=:gray65, linecolor=:gray35, alpha=0.8)
     Plots.plot!(p, table_top; label="", color=:gray80, linecolor=:gray35, alpha=0.9)
     Plots.plot!(p, ramp; label="", color=:white, linecolor=:black, alpha=0.95)
+    Plots.plot!(p, left_rail; label="", color=:gray45, linecolor=:gray20, alpha=0.9)
+    Plots.plot!(p, right_rail; label="", color=:gray45, linecolor=:gray20, alpha=0.9)
     return p
 end
 
@@ -68,7 +77,7 @@ function _draw_scene_objects!(p, metadata, positions_at_frame)
         table_position[3],
         metadata.obj_table_dims[1],
         metadata.obj_table_dims[3],
-        0.0
+        metadata.obj_table_orientation
     )
 
     Plots.plot!(p, ramp_obj; label="ramp object", color=:steelblue, linecolor=:steelblue4, alpha=0.85)
@@ -207,21 +216,40 @@ end
 
 """
     particle_scene_limits(true_trajectory, particle_trajectories;
-                          plane=(1, 3), object_indices=nothing, padding=0.35)
+                          plane=(1, 3), object_indices=nothing, padding=0.35,
+                          scene=nothing)
 
 Compute fixed limits over the entire true and particle histories. The default
 `(1, 3)` plane is the x-z side view used by the ramp collision scene.
+Pass the ramp `scene` to include its static geometry in those limits.
 """
 function particle_scene_limits(true_trajectory, particle_trajectories;
                                plane::Tuple{Int,Int}=(1, 3),
                                object_indices=nothing,
-                               padding::Real=0.35)
+                               padding::Real=0.35,
+                               scene=nothing)
     all(axis -> axis in 1:3, plane) || error("plane axes must be in 1:3")
     plane[1] != plane[2] || error("plane axes must be distinct")
     padding >= 0 || error("padding must be nonnegative")
 
     xs = Float64[]
     ys = Float64[]
+
+    if scene !== nothing && plane == (1, 3)
+        metadata = scene_metadata(scene)
+        append!(xs, (
+            -metadata.table_dims[1] / 2,
+            metadata.table_dims[1] / 2,
+            metadata.ramp_position[1],
+            metadata.ramp_position[1] + metadata.ramp_dims[1],
+        ))
+        append!(ys, (
+            -(metadata.base_dims[3] + metadata.table_dims[3]),
+            metadata.ramp_position[3],
+            metadata.ramp_position[3] + metadata.ramp_dims[3],
+        ))
+    end
+
     T = _trajectory_frame_count(true_trajectory)
 
     for t in 1:T
@@ -240,7 +268,7 @@ end
 """
     draw_scene_svg(true_trajectory, particle_trajectories, t;
                    show_particles=true, limits=nothing, collision_time=nothing,
-                   plane=(1, 3), object_indices=nothing)
+                   plane=(1, 3), object_indices=nothing, scene=nothing)
 
 Draw a lightweight, fixed-axis 2D particle-debugging view. True objects 1 and
 2 are dark blue and orange; their particle predictions are light blue and
@@ -252,12 +280,13 @@ function draw_scene_svg(true_trajectory, particle_trajectories, t::Int;
                         limits=nothing,
                         collision_time=nothing,
                         plane::Tuple{Int,Int}=(1, 3),
-                        object_indices=nothing)
+                        object_indices=nothing,
+                        scene=nothing)
     T = _trajectory_frame_count(true_trajectory)
     t in 1:T || throw(BoundsError(1:T, t))
     fixed_limits = limits === nothing ?
         particle_scene_limits(true_trajectory, particle_trajectories;
-                              plane=plane, object_indices=object_indices) : limits
+                              plane=plane, object_indices=object_indices, scene=scene) : limits
     true_positions = true_object_positions(true_trajectory, t; object_indices=object_indices)
     length(true_positions) >= 2 || error("Particle scene visualization requires two true objects.")
 
@@ -275,6 +304,10 @@ function draw_scene_svg(true_trajectory, particle_trajectories, t::Int;
         size=(700, 420),
         fmt=:svg
     )
+
+    if scene !== nothing && plane == (1, 3)
+        _draw_scene_base!(p, scene_metadata(scene))
+    end
 
     true_colors = (:steelblue, :darkorange)
     true_markers = (:circle, :diamond)
@@ -337,6 +370,227 @@ function draw_scene_svg(true_trajectory, particle_trajectories, t::Int;
     return p
 end
 
+################################################################################
+# Bullet camera with projected particle overlays
+################################################################################
+
+function _bullet_camera_matrices(; yaw::Real, pitch::Real, width::Int, height::Int)
+    view_matrix = pb.computeViewMatrixFromYawPitchRoll(
+        cameraTargetPosition=[0.0, 0.0, 0.15],
+        distance=4.5,
+        yaw=Float64(yaw),
+        pitch=Float64(pitch),
+        roll=0.0,
+        upAxisIndex=2,
+    )
+    projection_matrix = pb.computeProjectionMatrixFOV(
+        fov=55.0,
+        aspect=width / height,
+        nearVal=0.05,
+        farVal=20.0,
+    )
+    return view_matrix, projection_matrix
+end
+
+function _project_camera_point(position, view_matrix, projection_matrix, width::Int, height::Int)
+    view = reshape(Float64.(collect(view_matrix)), 4, 4)
+    projection = reshape(Float64.(collect(projection_matrix)), 4, 4)
+    clip = projection * view * [position[1], position[2], position[3], 1.0]
+    clip[4] > 0 || return nothing
+
+    ndc = clip[1:3] ./ clip[4]
+    all(isfinite, ndc) || return nothing
+    all(-1.0 <= coordinate <= 1.0 for coordinate in ndc) || return nothing
+
+    pixel_x = (ndc[1] + 1.0) * 0.5 * (width - 1) + 1.0
+    pixel_y = (1.0 - (ndc[2] + 1.0) * 0.5) * (height - 1) + 1.0
+    return (pixel_x, pixel_y)
+end
+
+function _scatter_projected_positions!(plot_handle, positions,
+                                       view_matrix, projection_matrix, width::Int, height::Int;
+                                       label, color, marker=:circle, markersize=4,
+                                       alpha=0.6, markerstrokewidth=0)
+    projected = Tuple{Float64,Float64}[]
+    for position in positions
+        length(position) >= 3 || continue
+        point = _project_camera_point(position, view_matrix, projection_matrix, width, height)
+        point === nothing || push!(projected, point)
+    end
+    isempty(projected) && return plot_handle
+
+    Plots.scatter!(
+        plot_handle,
+        first.(projected),
+        last.(projected);
+        label=label,
+        color=color,
+        marker=marker,
+        markersize=markersize,
+        alpha=alpha,
+        markerstrokecolor=:black,
+        markerstrokewidth=markerstrokewidth,
+    )
+    return plot_handle
+end
+
+"""
+    bullet_camera_plot(scene, state; frame, particle_positions=nothing,
+                       show_particles=true, yaw=0, pitch=-35)
+
+Render a stored state with Bullet's off-screen camera. True dynamic-object
+centres and optional per-particle inferred positions are projected through the
+same camera matrices and drawn as registered overlays.
+"""
+function bullet_camera_plot(scene, state;
+                            frame::Int,
+                            particle_positions=nothing,
+                            show_particles::Bool=true,
+                            yaw::Real=0.0,
+                            pitch::Real=-35.0,
+                            width::Int=640,
+                            height::Int=360)
+    width > 0 || error("camera width must be positive")
+    height > 0 || error("camera height must be positive")
+
+    objects = hasproperty(state, :objects) ? state.objects : state
+    PhySMC.sync!(scene.sim, objects)
+    view_matrix, projection_matrix = _bullet_camera_matrices(
+        yaw=yaw,
+        pitch=pitch,
+        width=width,
+        height=height,
+    )
+    rgba = pb.getCameraImage(
+        width,
+        height;
+        viewMatrix=view_matrix,
+        projectionMatrix=projection_matrix,
+        renderer=pb.ER_TINY_RENDERER,
+        physicsClientId=scene.client,
+    )[3]
+    image = [
+        RGB{Float64}(rgba[y, x, 1] / 255, rgba[y, x, 2] / 255, rgba[y, x, 3] / 255)
+        for y in axes(rgba, 1), x in axes(rgba, 2)
+    ]
+
+    plot_handle = Plots.heatmap(
+        image;
+        xlim=(0.5, width + 0.5),
+        ylim=(0.5, height + 0.5),
+        yflip=true,
+        aspect_ratio=:equal,
+        colorbar=false,
+        axis=nothing,
+        ticks=nothing,
+        border=:none,
+        legend=:topright,
+        size=(960, 540),
+        title="Bullet 3D camera at t=$(frame)",
+    )
+
+    dynamic_indices = dynamic_object_indices(objects)
+    true_positions = [objects.kinematics[index].position for index in dynamic_indices]
+    true_colors = (:steelblue, :darkorange)
+    true_markers = (:circle, :diamond)
+    for object_index in eachindex(true_positions)
+        _scatter_projected_positions!(
+            plot_handle,
+            [true_positions[object_index]],
+            view_matrix,
+            projection_matrix,
+            width,
+            height;
+            label="true object $object_index",
+            color=true_colors[mod1(object_index, length(true_colors))],
+            marker=true_markers[mod1(object_index, length(true_markers))],
+            markersize=7,
+            alpha=0.95,
+            markerstrokewidth=1.5,
+        )
+    end
+
+    if show_particles && particle_positions !== nothing
+        particle_colors = ("#79BDF2", "#FFB766")
+        object_count = isempty(particle_positions) ? 0 : minimum(length, particle_positions)
+        for object_index in 1:object_count
+            positions = [particle[object_index] for particle in particle_positions]
+            _scatter_projected_positions!(
+                plot_handle,
+                positions,
+                view_matrix,
+                projection_matrix,
+                width,
+                height;
+                label="object $object_index inference particles",
+                color=particle_colors[mod1(object_index, length(particle_colors))],
+            )
+        end
+    end
+
+    return plot_handle
+end
+
+
+struct ScenePlaybackSlider
+    max_value::Int
+    default::Int
+    interval_ms::Int
+end
+
+function ScenePlaybackSlider(max_value::Int; default::Int=1, fps::Real=6)
+    max_value > 0 || error("ScenePlaybackSlider requires at least one frame.")
+    default in 1:max_value || error("ScenePlaybackSlider default must be in 1:max_value.")
+    fps > 0 || error("ScenePlaybackSlider fps must be positive.")
+    return ScenePlaybackSlider(max_value, default, round(Int, 1000 / fps))
+end
+
+Base.get(widget::ScenePlaybackSlider) = widget.default
+
+function Base.show(io::IO, ::MIME"text/html", widget::ScenePlaybackSlider)
+    write(io, """
+    <galileo-playback-slider style="display:flex;align-items:center;gap:0.65rem;max-width:38rem">
+      <button type="button" title="Play or pause 3D playback" style="width:2.4rem;height:2rem">&#9654;</button>
+      <input type="range" min="1" max="$(widget.max_value)" value="$(widget.default)" step="1" style="flex:1">
+      <output style="min-width:3rem;font-variant-numeric:tabular-nums">$(widget.default)</output>
+    </galileo-playback-slider>
+    <script>
+      const root = currentScript.previousElementSibling
+      const button = root.querySelector("button")
+      const slider = root.querySelector("input")
+      const output = root.querySelector("output")
+      const intervalMs = $(widget.interval_ms)
+      let timer = null
+
+      const publish = () => {
+        root.value = slider.valueAsNumber
+        output.value = slider.value
+        root.dispatchEvent(new CustomEvent("input"))
+      }
+      const stop = () => {
+        clearInterval(timer)
+        timer = null
+        button.innerHTML = "&#9654;"
+      }
+
+      slider.addEventListener("input", publish)
+      button.addEventListener("click", () => {
+        if (timer === null) {
+          button.innerHTML = "&#10074;&#10074;"
+          timer = setInterval(() => {
+            slider.value = slider.valueAsNumber >= Number(slider.max) ? 1 : slider.valueAsNumber + 1
+            publish()
+          }, intervalMs)
+        } else {
+          stop()
+        }
+      })
+      root.value = slider.valueAsNumber
+      invalidation.then(stop)
+    </script>
+    """)
+end
+
 """
     save_particle_scene_gif(path, true_trajectory, particle_trajectories;
                             fps=10, show_particles=true, kwargs...)
@@ -351,11 +605,12 @@ function save_particle_scene_gif(path::AbstractString,
                                  limits=nothing,
                                  plane::Tuple{Int,Int}=(1, 3),
                                  object_indices=nothing,
-                                 collision_time=nothing)
+                                 collision_time=nothing,
+                                 scene=nothing)
     fps > 0 || error("fps must be positive")
     fixed_limits = limits === nothing ?
         particle_scene_limits(true_trajectory, particle_trajectories;
-                              plane=plane, object_indices=object_indices) : limits
+                              plane=plane, object_indices=object_indices, scene=scene) : limits
     animation = Plots.Animation()
 
     for t in 1:_trajectory_frame_count(true_trajectory)
@@ -367,7 +622,8 @@ function save_particle_scene_gif(path::AbstractString,
             limits=fixed_limits,
             collision_time=collision_time,
             plane=plane,
-            object_indices=object_indices
+            object_indices=object_indices,
+            scene=scene,
         )
         Plots.frame(animation, frame_plot)
     end

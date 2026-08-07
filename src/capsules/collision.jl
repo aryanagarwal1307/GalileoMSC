@@ -2,9 +2,38 @@
 # Collision capsule
 ################################################################################
 
+# Shortest vector from A's AABB to B's AABB. Each component is zero on axes
+# where the boxes overlap, positive when B is above A, and negative otherwise.
+@inline function _aabb_axis_separation(a_min::Real, a_max::Real, b_min::Real, b_max::Real)
+    a_max < b_min && return b_min - a_max
+    b_max < a_min && return b_max - a_min
+    return 0.0
+end
+
+@inline function bounding_box_separation(aabb_a, aabb_b, eps::Float64=0.0)
+    a_min, a_max = aabb_a
+    b_min, b_max = aabb_b
+
+    @inbounds begin
+        sx = _aabb_axis_separation(a_min[1], a_max[1], b_min[1], b_max[1])
+        sy = _aabb_axis_separation(a_min[2], a_max[2], b_min[2], b_max[2])
+        sz = _aabb_axis_separation(a_min[3], a_max[3], b_min[3], b_max[3])
+    end
+
+    gap = sqrt(sx * sx + sy * sy + sz * sz)
+    if gap > eps
+        inv_gap = 1.0 / gap
+        return (gap = gap, nx = sx * inv_gap, ny = sy * inv_gap, nz = sz * inv_gap, separated = true)
+    end
+
+    return (gap = gap, nx = 0.0, ny = 0.0, nz = 0.0, separated = false)
+end
+
+@inline _sigmoid(z::Real) = 1.0 / (1.0 + exp(-z))
+
 # Helper to calculate collision birth and death probability
 function collision_helper(objects::BulletState, a::Int, b::Int, params::MSCParams;
-                          surface_gap::Union{Nothing,Float64}=nothing)
+                          separation=nothing)
     # Extract kinematic properties from the bullet state
     ka = objects.kinematics[a]
     kb = objects.kinematics[b]
@@ -20,45 +49,39 @@ function collision_helper(objects::BulletState, a::Int, b::Int, params::MSCParam
     end
 
     # Relative distance and velocity in 3D.
-    distance = sqrt(dx^2 + dy^2 + dz^2)
-    inv_distance = 1.0 / max(distance, params.eps)
+    distance = sqrt(dx * dx + dy * dy + dz * dz)
 
-    # Positive means the surface gap is shrinking.
-    v_closing = -(dvx * dx + dvy * dy + dvz * dz) * inv_distance
-
-    # AABB separation is exact for axis-aligned boxes and tighter than the
-    # previous diagonal bounding-sphere approximation.
-    gap = isnothing(surface_gap) ? bounding_box_distance(ka.aabb, kb.aabb) : surface_gap
+    # Use the same shortest AABB separating direction for gap and closing speed.
+    # Positive closing speed means the AABB surface gap is shrinking.
+    sep = separation === nothing ? bounding_box_separation(ka.aabb, kb.aabb, params.eps) : separation
+    gap = sep.gap
+    v_closing = sep.separated ? -(dvx * sep.nx + dvy * sep.ny + dvz * sep.nz) : 0.0
 
     # Constant velocity time to contact 
-    if gap > 0.0 && v_closing > params.birth_v_min
+    if sep.separated && v_closing > params.birth_v_min
         tau = gap / v_closing
     else
         tau = NaN               # If the objects are not separated & approaching, tau is meaningless 
     end
 
     # Sigmoidal scores 
-    sigmoid(z) = 1 / (1 + exp(-z))
-
-    p_gap = sigmoid((params.birth_gap_max - gap) / params.birth_gap_scale)
-    p_closing = sigmoid((v_closing - params.birth_v_min) / params.birth_v_scale)
+    p_gap = _sigmoid((params.birth_gap_max - gap) / params.birth_gap_scale)
+    p_closing = _sigmoid((v_closing - params.birth_v_min) / params.birth_v_scale)
 
     if isnan(tau)
         p_ttc = 0.0
     else
-        p_ttc = sigmoid((params.birth_T_contact - tau) / params.birth_tau_scale)
+        p_ttc = _sigmoid((params.birth_T_contact - tau) / params.birth_tau_scale)
     end
 
     # Final collision birth probability for this pair.
     birth_prob = params.birth_base * p_gap * p_closing * p_ttc
 
-    # Survival probability 
-    near_gap = max(gap, 0.0)
-    near_score = exp(-((near_gap / params.survival_distance_scale)^2))
-
     return (
         distance = distance,
         gap = gap,
+        normal = (sep.nx, sep.ny, sep.nz),
+        separated = sep.separated,
         v_closing = v_closing,
         tau = tau,
 
@@ -66,8 +89,7 @@ function collision_helper(objects::BulletState, a::Int, b::Int, params::MSCParam
         p_closing = p_closing,
         p_ttc = p_ttc,
 
-        birth_prob = birth_prob,
-        near_score = near_score
+        birth_prob = birth_prob
     )
 end
 
@@ -85,14 +107,14 @@ end
 function bounding_box_distance(aabb_a, aabb_b)
     a_min, a_max = aabb_a
     b_min, b_max = aabb_b
-    sep_sq = 0.0
 
-    @inbounds for i in 1:3
-        sep = max(a_min[i] - b_max[i], b_min[i] - a_max[i], 0.0)
-        sep_sq += sep^2
+    @inbounds begin
+        sx = _aabb_axis_separation(a_min[1], a_max[1], b_min[1], b_max[1])
+        sy = _aabb_axis_separation(a_min[2], a_max[2], b_min[2], b_max[2])
+        sz = _aabb_axis_separation(a_min[3], a_max[3], b_min[3], b_max[3])
     end
 
-    return sqrt(sep_sq)
+    return sqrt(sx * sx + sy * sy + sz * sz)
 end
 
 """
@@ -134,9 +156,13 @@ function collision_birth_weight(st::MSCState, a::Int, b::Int, params::MSCParams,
         return 0.0
     end
 
-    aabb_distance = bounding_box_distance(st.objects.kinematics[a].aabb, st.objects.kinematics[b].aabb)
-    if aabb_distance <= params.birth_aabb_window
-        features = collision_helper(st.objects, a, b, params; surface_gap=aabb_distance)
+    separation = bounding_box_separation(
+        st.objects.kinematics[a].aabb,
+        st.objects.kinematics[b].aabb,
+        params.eps
+    )
+    if separation.gap <= params.birth_aabb_window
+        features = collision_helper(st.objects, a, b, params; separation=separation)
         return max(Float64(features.birth_prob), default_weight)
     end
 
@@ -231,16 +257,8 @@ function collision_birth_candidate_pair(st::MSCState, active_capsules::Vector{MS
     error("Invalid collision birth candidate index: $candidate_index")
 end
 
-# Helper to clamp probability for numerical stability
-function _clamp_probability(p::Real)
-    return clamp(Float64(p), 1e-4, 1.0 - 1e-4)
-end
-
 # Helper to calculate the survival probability for a collision capsule
 function collision_survival_probability(st::MSCState, cap::CollisionMSC, params::MSCParams)
-    # Get the collision features
-    features = collision_helper(st.objects, cap.a, cap.b, params)
-
     # Check if the minimum number of steps has passed yet 
     if cap.age <= params.min_active_steps
         return params.min_age_survival
@@ -250,20 +268,7 @@ function collision_survival_probability(st::MSCState, cap::CollisionMSC, params:
     age_excess = max(cap.age - params.min_active_steps, 0)
     age_penalty = exp(-age_excess / params.age_decay_steps)
 
-    ## Distance Component ##
-    # near_gap = max(features.gap, 0.0)
-    # near_score = exp(-((near_gap / params.survival_distance_scale)^2))
-
-    ## Velocity Component 
-    # v_separating = -features.v_closing
-    # sigmoid(z) = 1 / (1 + exp(-z))
-    # p_separating = sigmoid((v_separating - params.death_v_min) / params.death_v_scale)
-    # velocity_survival = 1.0 - p_separating
-
-    # Survival prob is e^(-distance/scale)*e^((-age_excess/scale)^2)*(1 - sigmoid((-closing_speed - min_v)/v_scale))
-    p = age_penalty # * near_score * velocity_survival
-
-    return p
+    return age_penalty
 end
 
 # Active collision capsules sample an absolute mass, then encode it as a diff.

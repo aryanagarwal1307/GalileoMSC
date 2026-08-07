@@ -15,7 +15,7 @@ end
 const sm_chain = Gen.Unfold(particle_filter_physics_step)
 
 @gen (static) function particle_filter_model(T::Int, sim::BulletSim, template::BulletState)
-    # distribution over mass and restitution for objects from the prior
+    # Sample the tracked object's mass; scene restitution is fixed by RampScene.
     latents ~ prior(template.latents)
     init_state = Accessors.setproperties(template; latents=latents)
 

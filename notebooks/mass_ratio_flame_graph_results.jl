@@ -16,16 +16,20 @@ end
 begin
     default_results_root = joinpath(@__DIR__, "..", "results")
 
-    job_number = "1978319"
+    job_number = get(ENV, "GALILEO_MSC_JOB_NUMBER", "")
     selected_model = get(ENV, "GALILEO_MSC_FLAME_MODEL", "msc")
-    selected_run = parse(Int, get(ENV, "GALILEO_MSC_FLAME_RUN", "6"))
+    selected_run_override = get(ENV, "GALILEO_MSC_FLAME_RUN", nothing)
 end
 
 # ╔═╡ 107e4893-09c5-466a-91a0-3f59126f7ea2
 begin
     function latest_result_dir(root::AbstractString)
         isdir(root) || return root
-        dirs = [joinpath(root, name) for name in readdir(root) if isdir(joinpath(root, name))]
+        dirs = [
+            joinpath(root, name)
+            for name in readdir(root)
+            if isdir(joinpath(root, name)) && isfile(joinpath(root, name, "flame_graph.csv"))
+        ]
         isempty(dirs) && return root
         return dirs[argmax(mtime.(dirs))]
     end
@@ -116,6 +120,13 @@ begin
         for row in flame_rows
         if row.run !== missing
     ]); by = item -> (item.model, item.run))
+    model_runs = filter(item -> item.model == selected_model, available_runs)
+    selected_run = if selected_run_override === nothing
+        isempty(model_runs) && error("No saved flame-graph runs found for model=$selected_model.")
+        first(model_runs).run
+    else
+        parse(Int, selected_run_override)
+    end
 
     (
         flame_graph_path = flame_graph_path,

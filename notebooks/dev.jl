@@ -13,9 +13,5 @@ begin
 	using GalileoMSC
 end
 
-# ╔═╡ 2b279fec-c696-4f3c-9b6d-f342fc393867
-
-
 # ╔═╡ Cell order:
 # ╠═c03fbc42-3f22-11f1-861b-2b93190948b7
-# ╠═2b279fec-c696-4f3c-9b6d-f342fc393867

@@ -9,7 +9,6 @@ begin
     import Pkg
     Pkg.activate(joinpath(@__DIR__, ".."))
 
-    #include(joinpath(@__DIR__, "..", "src", "GalileoMSC.jl"))
     using Revise
     using GalileoMSC
     using Plots
