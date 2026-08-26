@@ -32,16 +32,16 @@ end
 # ╔═╡ a62867f7-cad0-443b-9135-58cdd6561e06
 begin
     selected_models = [:particle_filter, :msc]
-    T = 120
+    T = 150
     particles = 20
     rejuv_moves = 1
-    true_mass_ratio = 1.5
+    true_mass_ratio = 2.0
     obj_frictions = (0.05, 0.2)
     obj_positions = (0.5, 1.5)
     slope = 0.9
     tableRampIntersection = 0.0
     restitution = 0.5
-    time_bin_size = 10
+    time_bin_size = 3
     rng_seed = 11
 end
 
@@ -165,6 +165,104 @@ plot_mass_ratio_variance_comparison(
     title = "Particle filter vs MSC posterior variance"
 )
 
+# ╔═╡ 73b9f4f8-2820-4d75-ad41-4e31a23f58e6
+begin
+    function variance_rate_history(history, bin_size::Int)
+        sorted_history = sort(collect(history); by=h -> h.t)
+        isempty(sorted_history) && return NamedTuple[]
+
+        variance_history = if bin_size <= 1
+            [(t = Float64(h.t), variance = h.std^2) for h in sorted_history]
+        else
+            binned = NamedTuple[]
+            first_t = minimum([h.t for h in sorted_history])
+            last_t = maximum([h.t for h in sorted_history])
+
+            for bin_start in first_t:bin_size:last_t
+                bin_stop = bin_start + bin_size - 1
+                rows = [h for h in sorted_history if bin_start <= h.t <= bin_stop]
+                isempty(rows) && continue
+
+                push!(binned, (
+                    t = Float64(mean([h.t for h in rows])),
+                    variance = mean([h.std^2 for h in rows])
+                ))
+            end
+
+            binned
+        end
+
+        rates = NamedTuple[]
+        for i in 2:length(variance_history)
+            prev = variance_history[i - 1]
+            curr = variance_history[i]
+            dt = curr.t - prev.t
+            dt == 0 && continue
+
+            push!(rates, (
+                t = (prev.t + curr.t) / 2,
+                rate = (curr.variance - prev.variance) / dt
+            ))
+        end
+
+        return rates
+    end
+
+    p = plot(
+        xlabel = "time",
+        ylabel = "variance change per step",
+        title = "Posterior variance rate of change",
+        legend = :topright
+    )
+
+    for item in mass_and_msc_cmp.results
+        rates = variance_rate_history(item.history, time_bin_size)
+        isempty(rates) && continue
+
+        plot!(
+            p,
+            [r.t for r in rates],
+            [r.rate for r in rates];
+            label = item.label,
+            lw = 3,
+            marker = :circle,
+            ms = 3
+        )
+    end
+
+    hline!(p, [0.0]; label = "", color = :black, ls = :dot, lw = 1)
+
+    if collision_time !== nothing
+        vline!(p, [collision_time]; label = "collision time", lw = 2, ls = :dash)
+    end
+
+    p
+end
+
+# ╔═╡ ce9ce75e-9b12-4a98-a85a-e89ec3722d98
+begin
+    trace_inspection_t = clamp(
+        collision_time === nothing ? length(msc_result.history) : collision_time,
+        1,
+        length(msc_result.history)
+    )
+    trace_inspection_particle = 1
+    trace_to_inspect = msc_result.history[trace_inspection_t].traces[trace_inspection_particle]
+    trace_inspection_state = Gen.get_retval(trace_to_inspect)[trace_inspection_t]
+
+    (
+        t = trace_inspection_t,
+        particle = trace_inspection_particle,
+        score = Gen.get_score(trace_to_inspect),
+        checkpoint = (
+            trace_inspection_state.last_clause_checkpoint_t,
+            trace_inspection_state.last_clause_checkpoint_msc_id
+        ),
+        trace = trace_to_inspect,
+        choices = Gen.get_choices(trace_to_inspect)
+    )
+end
+
 # ╔═╡ de13c5a2-f8c7-4eb0-a218-d990718fc9a6
 md"""
 ## Particle trajectory debugger
@@ -267,6 +365,8 @@ save_particle_scene_gif(
 # ╠═74e366ec-8f05-4235-a4e7-b4e17725ee21
 # ╠═d5995f77-6cf6-4867-b21d-72febed2fb8e
 # ╠═8678d0a3-f37e-4391-937e-058a3e794052
+# ╠═73b9f4f8-2820-4d75-ad41-4e31a23f58e6
+# ╠═ce9ce75e-9b12-4a98-a85a-e89ec3722d98
 # ╟─de13c5a2-f8c7-4eb0-a218-d990718fc9a6
 # ╠═f3808d50-4d33-4f8a-8aa7-f55093072774
 # ╟─5fdedfff-8c7e-42e7-b64e-55ad4b261578
