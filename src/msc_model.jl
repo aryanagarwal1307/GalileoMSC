@@ -105,7 +105,7 @@ function msc_clause_branch(cap::MSC)
     error("Unknown capsule type: $(typeof(cap))")
 end
 
-# Switch combinator for active capsule clauses.
+# Switch combinator for capsule birth clauses.
 const msc_capsule_clause = Gen.Switch(
     MSC_CLAUSE_BRANCHES,
     msc_collision_clause
@@ -116,25 +116,22 @@ const msc_capsule_clause = Gen.Switch(
 
     capsule_update ~ capsule_kernel(t, prev, params)
 
-    capsule_diffs = Vector{CapsuleDiff}(undef, length(capsule_update.capsules))
-    for i in eachindex(capsule_update.capsules)
-        cap = capsule_update.capsules[i]
-        branch = msc_clause_branch(cap)
-        capsule_diffs[i] = {:msc_switch => cap.id => :clause} ~ msc_capsule_clause(branch, prev.objects, cap, params)
-    end
-
-    diffed_objects = apply_capsule_diffs(prev.objects, capsule_diffs)
-    next_objects = PhySMC.step(sim, diffed_objects)
-
-    positions ~ Gen.Map(observe)(next_objects.kinematics)
-
+    diffed_objects = prev.objects
     checkpoint_t = prev.last_clause_checkpoint_t
     checkpoint_msc_id = prev.last_clause_checkpoint_msc_id
-    if !isempty(capsule_update.capsules)
+
+    if capsule_update.stats.born
         cap = capsule_update.capsules[end]
+        branch = msc_clause_branch(cap)
+        capsule_diff = {:msc_switch => cap.id => :clause} ~ msc_capsule_clause(branch, prev.objects, cap, params)
+        diffed_objects = apply_capsule_diffs(prev.objects, CapsuleDiff[capsule_diff])
         checkpoint_t = t
         checkpoint_msc_id = cap.id
     end
+
+    next_objects = PhySMC.step(sim, diffed_objects)
+
+    positions ~ Gen.Map(observe)(next_objects.kinematics)
 
     return MSCState(
         next_objects,
