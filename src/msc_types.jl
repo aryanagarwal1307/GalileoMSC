@@ -5,11 +5,11 @@ Base.@kwdef struct MSCParams
 
     # Collision Birth Features: 
     birth_gap_max::Float64 = 0.15               # Maximum gap for which objects are 'close'
-    birth_gap_scale::Float64 = 0.02             # Gap gate parameter 
+    birth_gap_scale::Float64 = 0.015            # Gap gate parameter 
     birth_v_min::Float64 = 0.10                 # Minimum closing speed for which objects are 'approaching'
-    birth_v_scale::Float64 = 0.02               # Closing speed gate parameter 
+    birth_v_scale::Float64 = 0.015              # Closing speed gate parameter 
     birth_T_contact::Float64 = 0.16             # Contact prediction horizon
-    birth_tau_scale::Float64 = 0.04             # Time to contact gate parameter
+    birth_tau_scale::Float64 = 0.03             # Time to contact gate parameter
     birth_base::Float64 = 0.99                  # Base probability of collision when all predicates are satisfied
     birth_aabb_window::Float64 = 1.0            # AABB distance window for full birth predicate evaluation
     birth_background_weight::Float64 = 1e-8     # Uniform candidate weight outside the AABB window
@@ -17,10 +17,10 @@ Base.@kwdef struct MSCParams
     # Collision Death Features 
     min_active_steps::Int = 5                   # minimum steps for capsule to be active
     min_age_survival::Float64 = 1.0             # min survival prob early on
-    age_decay_steps::Float64 = 9.0              # gradual decay of survival
+    age_decay_steps::Float64 = 25.0             # gradual decay of survival
 
     no_birth_weight::Float64 = 0.3              # weight of having no capsule births
-    collision_mass_drift_std::Float64 = 1.0     # std for active-collision mass drift
+    collision_mass_drift_std::Float64 = 1.0     # std for collision birth-time mass sampling
     tracked_mass_object::Int = 1                # object to summarize in mass history
 end
 

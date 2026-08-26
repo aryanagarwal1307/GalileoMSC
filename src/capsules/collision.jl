@@ -271,7 +271,7 @@ function collision_survival_probability(st::MSCState, cap::CollisionMSC, params:
     return age_penalty
 end
 
-# Active collision capsules sample an absolute mass, then encode it as a diff.
+# Collision capsule births sample an absolute mass, then encode it as a diff.
 @gen function msc_collision_clause(prev_objects::BulletState, cap::MSC, params::MSCParams)
     collision = cap::CollisionMSC
     prev_mass = object_mass(prev_objects.latents[collision.a])
