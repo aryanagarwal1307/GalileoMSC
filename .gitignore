@@ -11,6 +11,7 @@ results/
 stimuli/generated/trajectories/
 stimuli/generated/frames/
 stimuli/generated/videos/
+stimuli/generated/build/
 
 # Julia local build/test artifacts
 *.jl.cov
