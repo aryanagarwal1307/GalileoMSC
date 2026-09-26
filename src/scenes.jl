@@ -1,5 +1,17 @@
 const DEFAULT_RAMP_ASSET_DIR = normpath(joinpath(@__DIR__, "..", "assets"))
 const DEFAULT_SCENE_RESTITUTION = 0.5
+const DEFAULT_RAMP_OBJECT_DIMS = (0.15, 0.3, 0.075)
+const DEFAULT_TABLE_OBJECT_DIMS = (0.2, 0.2, 0.1)
+
+function _positive_finite(value::Real, name::AbstractString)
+    isfinite(value) && value > 0 || throw(ArgumentError("$name must be finite and positive"))
+    return value
+end
+
+function _object_dimensions(dims, name::AbstractString)
+    length(dims) == 3 || throw(ArgumentError("$name must contain three dimensions"))
+    return ntuple(i -> _positive_finite(Float64(dims[i]), name), 3)
+end
 
 struct RampSceneMetadata
     mass_ratio::Float64
@@ -40,11 +52,11 @@ function _ramp_scene_metadata(mass_ratio::Float64,
                               obj_positions::NTuple{2,Float64},
                               slope::Float64,
                               tableRampIntersection::Float64,
-                              restitution::Float64)
+                              restitution::Float64,
+                              obj_ramp_dims::Vector{Float64},
+                              obj_table_dims::Vector{Float64})
     base_dims = [5.0, 1.0, 0.75]
     table_dims = [base_dims[1] + 0.2, base_dims[2] + 0.2, 0.1]
-    obj_ramp_dims = [0.15, 0.3, 0.075]
-    obj_on_table_dims = [0.2, 0.2, 0.1]
     theta_radians = -atan(slope)
     lift = obj_ramp_dims[3] / 2
 
@@ -54,7 +66,7 @@ function _ramp_scene_metadata(mass_ratio::Float64,
         0.0,
         (2 - 2 * obj_positions[1]) * slope - lift * sin(theta_radians)
     ]
-    table_obj_position = [2.5 * (obj_positions[2] - 1), 0.0, obj_on_table_dims[3] / 2]
+    table_obj_position = [2.5 * (obj_positions[2] - 1), 0.0, obj_table_dims[3] / 2]
 
     return RampSceneMetadata(
         mass_ratio,
@@ -70,7 +82,7 @@ function _ramp_scene_metadata(mass_ratio::Float64,
         obj_ramp_dims,
         ramp_obj_position,
         theta_radians,
-        obj_on_table_dims,
+        obj_table_dims,
         table_obj_position,
         0.0
     )
@@ -82,6 +94,8 @@ Create the Galileo ramp scene in PyBullet.
 The positional and physical setup follows the original notebook's `ramp`
 function. By default this returns `(client, obj_on_ramp_id, obj_on_table_id)`.
 Set `return_metadata=true` when downstream plotting needs the scene geometry.
+`mass_ratio` is ramp-object mass / table-object mass; the table mass is 1.0.
+`obj_ramp_dims` and `obj_table_dims` are full box dimensions in meters.
 """
 function ramp(mass_ratio::Float64,
               obj_frictions::NTuple{2,Float64}=(0.5, 0.5),
@@ -91,10 +105,17 @@ function ramp(mass_ratio::Float64,
               connect_mode=pb.DIRECT,
               ramp_asset_dir::AbstractString=DEFAULT_RAMP_ASSET_DIR,
               restitution::Float64=DEFAULT_SCENE_RESTITUTION,
+              obj_ramp_dims=DEFAULT_RAMP_OBJECT_DIMS,
+              obj_table_dims=DEFAULT_TABLE_OBJECT_DIMS,
               return_metadata::Bool=false)
 
-    isfinite(restitution) || error("restitution must be finite")
-    0.0 <= restitution <= 1.0 || error("restitution must be between 0 and 1")
+    _positive_finite(mass_ratio, "mass_ratio")
+    obj_ramp_dims = collect(_object_dimensions(obj_ramp_dims, "obj_ramp_dims"))
+    obj_table_dims = collect(_object_dimensions(obj_table_dims, "obj_table_dims"))
+    isfinite(restitution) && 0.0 <= restitution <= 1.0 ||
+        throw(ArgumentError("restitution must be between 0 and 1"))
+    metadata = _ramp_scene_metadata(mass_ratio, obj_frictions, obj_positions,
+        slope, tableRampIntersection, restitution, obj_ramp_dims, obj_table_dims)
 
     # for debugging
     #client = @pycall pb.connect(pb.GUI)::Int64
@@ -106,8 +127,8 @@ function ramp(mass_ratio::Float64,
 
     # add a table base (setting mass = 0 makes it a static object)
     grey = [0.5, 0.5, 0.5, 1]
-    base_dims = [5, 1, 0.75] # in meters
-    table_dims = [base_dims[1] + 0.2, base_dims[2] + 0.2, 0.1]  # Width, depth, height
+    base_dims = metadata.base_dims
+    table_dims = metadata.table_dims
     table_base_col_id = pb.createCollisionShape(pb.GEOM_BOX, halfExtents=base_dims / 2, physicsClientId=client)
     table_base_obj_id = pb.createMultiBody(baseCollisionShapeIndex=table_base_col_id, basePosition=[0, 0, -(base_dims[3] + table_dims[3]) / 2], physicsClientId=client)
     pb.changeDynamics(table_base_obj_id, -1; mass=0.0, restitution=restitution, physicsClientId=client)
@@ -146,8 +167,8 @@ function ramp(mass_ratio::Float64,
 
     # add a ramp
     pb.setAdditionalSearchPath(ramp_asset_dir; physicsClientId=client)
-    ramp_col_id = pb.createCollisionShape(pb.GEOM_MESH, fileName="ramp.obj", physicsClientId=client, meshScale=[2, base_dims[2], slope * 2])
-    ramp_position = [-2 + tableRampIntersection, -base_dims[2] / 2, 0]
+    ramp_col_id = pb.createCollisionShape(pb.GEOM_MESH, fileName="ramp.obj", physicsClientId=client, meshScale=metadata.ramp_dims)
+    ramp_position = metadata.ramp_position
     ramp_obj_id = pb.createMultiBody(baseCollisionShapeIndex=ramp_col_id, basePosition=ramp_position, physicsClientId=client)
     pb.changeDynamics(ramp_obj_id, -1; mass=0.0, restitution=restitution, physicsClientId=client)
     pb.changeVisualShape(ramp_obj_id, -1, rgbaColor=[1, 1, 1, 1], physicsClientId=client)
@@ -172,35 +193,20 @@ function ramp(mass_ratio::Float64,
     end
 
     # add an object on the ramp
-    obj_ramp_dims = [0.15, 0.3, 0.075]
-    theta_radians = -atan(slope)
+    theta_radians = metadata.obj_ramp_orientation
     orientation = [cos(theta_radians / 2), 0, sin(theta_radians / 2), 0]
 
     obj_on_ramp_col_id = pb.createCollisionShape(pb.GEOM_BOX, halfExtents=obj_ramp_dims / 2, physicsClientId=client)
-    lift = obj_ramp_dims[3] / 2
-    position = [
-        -2 + 2 * obj_positions[1] + tableRampIntersection + lift * cos(theta_radians),
-        0,
-        (2 - 2 * obj_positions[1]) * slope - lift * sin(theta_radians)
-    ]
+    position = metadata.obj_ramp_position
     obj_on_ramp_obj_id = pb.createMultiBody(baseCollisionShapeIndex=obj_on_ramp_col_id, basePosition=position, baseOrientation=orientation, physicsClientId=client)
     pb.changeDynamics(obj_on_ramp_obj_id, -1; mass=mass_ratio, restitution=restitution, lateralFriction=obj_frictions[1], physicsClientId=client)
 
     # add an object on the table that will collide with the object on the ramp as that one slides down
-    obj_on_table_dims = [0.2, 0.2, 0.1]
-    obj_on_table_col_id = pb.createCollisionShape(pb.GEOM_BOX, halfExtents=obj_on_table_dims / 2, physicsClientId=client)
-    obj_on_table_obj_id = pb.createMultiBody(baseCollisionShapeIndex=obj_on_table_col_id, basePosition=[2.5 * (obj_positions[2] - 1), 0, obj_on_table_dims[3] / 2], physicsClientId=client)
+    obj_on_table_col_id = pb.createCollisionShape(pb.GEOM_BOX, halfExtents=obj_table_dims / 2, physicsClientId=client)
+    obj_on_table_obj_id = pb.createMultiBody(baseCollisionShapeIndex=obj_on_table_col_id, basePosition=metadata.obj_table_position, physicsClientId=client)
     pb.changeDynamics(obj_on_table_obj_id, -1; mass=1.0, restitution=restitution, lateralFriction=obj_frictions[2], physicsClientId=client)
 
     if return_metadata
-        metadata = _ramp_scene_metadata(
-            mass_ratio,
-            obj_frictions,
-            obj_positions,
-            slope,
-            tableRampIntersection,
-            restitution,
-        )
         return (client, obj_on_ramp_obj_id, obj_on_table_obj_id, ramp_obj_id, table_body_id, metadata)
     end
 
@@ -213,6 +219,8 @@ function create_ramp_simulation(; mass_ratio::Float64=2.0,
                                 slope::Float64=2 / 3,
                                 tableRampIntersection::Float64=0.0,
                                 restitution::Float64=DEFAULT_SCENE_RESTITUTION,
+                                obj_ramp_dims=DEFAULT_RAMP_OBJECT_DIMS,
+                                obj_table_dims=DEFAULT_TABLE_OBJECT_DIMS,
                                 connect_mode=pb.DIRECT)
     client, obj_1, obj_2, ramp_surface_id, table_surface_id, metadata = ramp(
         mass_ratio,
@@ -222,6 +230,8 @@ function create_ramp_simulation(; mass_ratio::Float64=2.0,
         tableRampIntersection;
         connect_mode=connect_mode,
         restitution=restitution,
+        obj_ramp_dims=obj_ramp_dims,
+        obj_table_dims=obj_table_dims,
         return_metadata=true
     )
 
@@ -235,20 +245,8 @@ function create_ramp_simulation(; mass_ratio::Float64=2.0,
     # State order: moving objects first, then static surfaces.
     init_state = BulletState(sim, [obj_r, obj_t, ramp_surface, table_surface])
 
-    return RampScene(
-        client,
-        obj_1,
-        obj_2,
-        ramp_surface_id,
-        table_surface_id,
-        sim,
-        obj_r,
-        obj_t,
-        ramp_surface,
-        table_surface,
-        init_state,
-        metadata
-    )
+    return RampScene(client, obj_1, obj_2, ramp_surface_id, table_surface_id, sim,
+        obj_r, obj_t, ramp_surface, table_surface, init_state, metadata)
 end
 
 function sample_random_scene(; rng::AbstractRNG=Random.default_rng(),

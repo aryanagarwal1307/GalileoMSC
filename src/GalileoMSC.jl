@@ -10,12 +10,14 @@ using Plots
 using PyCall
 using Random
 using Statistics
+using TOML
 
 include("distributions/unsafe_fast_categorical.jl")
 include("distributions/log_uniform.jl")
 include("distributions/log_symmetric_peak.jl")
 include("common.jl")
 include("scenes.jl")
+include("stimuli.jl")
 include("particle_filter_model.jl")
 include("drift_model.jl")
 include("msc_types.jl")
@@ -51,6 +53,11 @@ export
     create_ramp_simulation,
     sample_random_scene,
     simulate_scene_positions,
+    # stimulus configuration
+    StimulusSpec,
+    DEFAULT_STIMULI_CONFIG,
+    load_stimuli,
+    stimulus_scene_kwargs,
     # particle-filter model
     particle_filter_model,
     model,
