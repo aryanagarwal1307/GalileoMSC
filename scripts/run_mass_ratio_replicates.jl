@@ -224,7 +224,8 @@ end
 function generate_observed_positions(config)
     Random.seed!(config.scene_seed)
     scene = make_scene(config)
-    constraints = mass_constraint(config.mass_ratio)
+    tracked_object = GalileoMSC.tracked_mass_object(scene.init_state)
+    constraints = mass_constraint(config.mass_ratio; object_id=tracked_object)
 
     trace = if config.scene_model in (:particle_filter, :particlefilter, :pf, :static)
         first(Gen.generate(particle_filter_model, (config.T, scene.sim, scene.init_state), constraints))
@@ -237,7 +238,7 @@ function generate_observed_positions(config)
         error("Unsupported --scene-model $(config.scene_model). Use particle_filter, drift, or msc.")
     end
 
-    ground_truth_mass = get_choices(trace)[:latents => :obj1 => :mass]
+    ground_truth_mass = get_choices(trace)[:latents => :obj => tracked_object => :mass]
     observed_positions = observations_from_trace(trace)
     collision_time = detect_collision_time(observed_positions)
     disconnect_scene(scene)
@@ -935,7 +936,7 @@ function write_metadata_csv(path, config, collision_time, ground_truth_mass, ela
         ["scene_model", config.scene_model],
         ["mass_ratio", config.mass_ratio],
         ["ground_truth_mass", ground_truth_mass],
-        ["ground_truth_mass_address", ":latents => :obj1 => :mass"],
+        ["ground_truth_mass_address", ":latents => :obj => tracked_object => :mass"],
         ["ground_truth_mass_note", "Synthetic scene generation constrains the initial mass ratio. For drift scene generation this is the constrained initial mass."],
         ["obj_frictions", join(config.obj_frictions, ",")],
         ["obj_positions", join(config.obj_positions, ",")],

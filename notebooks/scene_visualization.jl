@@ -1,5 +1,5 @@
 ### A Pluto.jl notebook ###
-# v0.20.24
+# v0.20.28
 
 using Markdown
 using InteractiveUtils
@@ -9,7 +9,6 @@ begin
     import Pkg
     Pkg.activate(joinpath(@__DIR__, ".."))
 
-    #include(joinpath(@__DIR__, "..", "src", "GalileoMSC.jl"))
     using GalileoMSC
     using Random
     using Plots

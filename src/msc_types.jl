@@ -4,36 +4,30 @@ Base.@kwdef struct MSCParams
     eps::Float64 = 1e-9
 
     # Collision Birth Features: 
-    birth_gap_max::Float64 = 0.05               # Maximum gap for which objects are 'close'
-    birth_gap_scale::Float64 = 0.02             # Gap gate parameter 
-    birth_v_min::Float64 = 0.02                 # Minimum closing speech for which objects are 'appraching'
-    birth_v_scale::Float64 = 0.02               # Closing speed gate parameter 
-    birth_T_contact::Float64 = 0.01             # Contact prediction horizon
-    birth_tau_scale::Float64 = 0.04             # Time to contact gate parameter
+    birth_gap_max::Float64 = 0.15               # Maximum gap for which objects are 'close'
+    birth_gap_scale::Float64 = 0.015            # Gap gate parameter 
+    birth_v_min::Float64 = 0.10                 # Minimum closing speed for which objects are 'approaching'
+    birth_v_scale::Float64 = 0.015              # Closing speed gate parameter 
+    birth_T_contact::Float64 = 0.16             # Contact prediction horizon
+    birth_tau_scale::Float64 = 0.03             # Time to contact gate parameter
     birth_base::Float64 = 0.99                  # Base probability of collision when all predicates are satisfied
     birth_aabb_window::Float64 = 1.0            # AABB distance window for full birth predicate evaluation
     birth_background_weight::Float64 = 1e-8     # Uniform candidate weight outside the AABB window
 
-    # Object dimensions 
-    obj_dims  = [[0.15, 0.3, 0.075], [0.2,  0.2, 0.1]] # ramp, then table 
-
     # Collision Death Features 
     min_active_steps::Int = 5                   # minimum steps for capsule to be active
     min_age_survival::Float64 = 1.0             # min survival prob early on
-    age_decay_steps::Float64 = 9.0              # gradual decay of survival
-    survival_distance_scale::Float64 = 0.45     # scale for near collision
-    death_v_min::Float64 = 0.02                 # velocity parameter 
-    death_v_scale::Float64 = 0.02               # Velocity parameter
+    age_decay_steps::Float64 = 25.0             # gradual decay of survival
 
     no_birth_weight::Float64 = 0.3              # weight of having no capsule births
-    collision_mass_drift_std::Float64 = 1.5     # std for active-collision mass drift
+    collision_mass_drift_std::Float64 = 1.0     # std for collision birth-time mass sampling
     tracked_mass_object::Int = 1                # object to summarize in mass history
 end
 
 const MSC_EVENT_TYPE_CODES = Dict(:collision => 1, :sliding => 2)
 const MSC_EVENT_TYPES_BY_CODE = Dict(1 => :collision, 2 => :sliding)
 const DEFAULT_MSC_PARAMS = MSCParams()
-const MSC_PHYSICS_BRANCHES = Dict(:no_capsule => 1, :collision => 2)
+const MSC_CLAUSE_BRANCHES = Dict(:collision => 1)
 
 # This is the abstract type for a capsule.
 abstract type MSC end
@@ -71,20 +65,22 @@ struct MSCState
     objects::BulletState
     # Vector of all active capsules in the scene
     capsules::Vector{MSC}
-    # Statistics for diagnostoc / plotting reasons
+    # Statistics for diagnostics and plotting
     event_stats::MSCEventStats
-    # Most recent time/object at which a collision capsule sampled mass.
-    last_mass_checkpoint_t::Int
-    last_mass_checkpoint_object::Int
+    # Most recent time/capsule clause that sampled an MSC latent.
+    last_clause_checkpoint_t::Int
+    last_clause_checkpoint_msc_id::Int
 end
 
-# A diff structure for one object, all latents to be updated
-struct ObjectDiff
+# A single additive latent update emitted by one capsule.
+struct LatentDelta
     object_id::Int
-    changes::Dict{Symbol, Float64}
+    latent::Symbol
+    delta::Float64
 end
 
 # A diff structure for all objects in a capsule, all latents to be updated
 struct CapsuleDiff
-    diffs::Vector{ObjectDiff}
+    capsule_id::Int
+    deltas::Vector{LatentDelta}
 end

@@ -19,7 +19,13 @@ begin
 
     function latest_result_dir(root::AbstractString)
         isdir(root) || return root
-        dirs = [joinpath(root, name) for name in readdir(root) if isdir(joinpath(root, name))]
+        required_files = ("summary.csv", "replicates.csv", "metadata.csv")
+        dirs = [
+            joinpath(root, name)
+            for name in readdir(root)
+            if isdir(joinpath(root, name)) &&
+               all(isfile(joinpath(root, name, file)) for file in required_files)
+        ]
         isempty(dirs) && return root
         return dirs[argmax(mtime.(dirs))]
     end

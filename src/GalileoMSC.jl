@@ -10,16 +10,19 @@ using Plots
 using PyCall
 using Random
 using Statistics
+using TOML
 
 include("distributions/unsafe_fast_categorical.jl")
 include("distributions/log_uniform.jl")
 include("distributions/log_symmetric_peak.jl")
 include("common.jl")
 include("scenes.jl")
+include("stimuli.jl")
 include("particle_filter_model.jl")
 include("drift_model.jl")
 include("msc_types.jl")
 include("msc_helpers.jl")
+include("capsules/collision.jl")
 include("msc_model.jl")
 include("plotting.jl")
 include("visualization.jl")
@@ -34,15 +37,27 @@ export
     template_mass_ratio,
     mass_constraint,
     observations_from_trace,
+    true_positions_from_trace,
     detect_collision_time,
-    gamma_from_mean_std,
     trunc_norm,
+    object_mass,
+    is_static_object,
+    is_dynamic_object,
+    dynamic_object_indices,
+    static_object_indices,
+    tracked_mass_object,
     unsafe_fast_categorical,
     # scenes
     ramp,
+    DEFAULT_SCENE_RESTITUTION,
     create_ramp_simulation,
     sample_random_scene,
     simulate_scene_positions,
+    # stimulus configuration
+    StimulusSpec,
+    DEFAULT_STIMULI_CONFIG,
+    load_stimuli,
+    stimulus_scene_kwargs,
     # particle-filter model
     particle_filter_model,
     model,
@@ -65,10 +80,14 @@ export
     CollisionMSC,
     MSCState,
     MSCEventStats,
+    LatentDelta,
+    CapsuleDiff,
     DEFAULT_MSC_PARAMS,
     msc_capsule_id,
     msc_capsule_key,
     initial_msc_state,
+    aggregate_capsule_diffs,
+    apply_capsule_diffs,
     collision_survival_probability,
     msc_model,
     msc_proposal,
@@ -92,6 +111,13 @@ export
     # visualization
     scene_metadata,
     visualize_scene,
-    plot_scene_trajectory
+    plot_scene_trajectory,
+    true_object_positions,
+    particle_object_positions,
+    particle_scene_limits,
+    draw_scene_svg,
+    bullet_camera_plot,
+    ScenePlaybackSlider,
+    save_particle_scene_gif
 
 end

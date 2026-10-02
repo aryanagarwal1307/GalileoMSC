@@ -4,43 +4,30 @@
 
 #### GENERATIVE FUNCTIONS ####
 
+function capsule_survival_probability(prev::MSCState, cap::CollisionMSC, params::MSCParams)
+    return collision_survival_probability(prev, cap, params)
+end
+
+function capsule_survival_probability(prev::MSCState, cap::MSC, params::MSCParams)
+    error("Unknown capsule type: $(typeof(cap))")
+end
+
+@gen function persist_capsule(cap::MSC, p_survive::Float64)
+    survived ~ bernoulli(p_survive)
+    return Bool(survived) ? increment_age(cap) : nothing
+end
+
+const capsule_persistence_map = Gen.Map(persist_capsule)
+
 # A generative function to track all persisting capsules
 @gen function capsule_persistence(prev::MSCState, params::MSCParams)
-    # Track all capsules that survive
-    persisted = Vector{MSC}(undef, length(prev.capsules))
-    n_persisted = 0
-
-    # Track the number of capsules that died
-    n_died = 0
-
-    # Loop over all capsules in the previous state
-    for i in eachindex(prev.capsules)
-        @inbounds cap = prev.capsules[i]
-        if cap isa CollisionMSC
-            # Calculate survival probability
-            p_survive = collision_survival_probability(prev, cap, params)
-
-            # Sample whether this capsule survives with bernoulli
-            survived = {:survived => i} ~ bernoulli(p_survive)
-
-            # If it survived, increment age. Else, kill.
-            if Bool(survived)
-                n_persisted += 1
-                @inbounds persisted[n_persisted] = increment_age(cap)
-            else
-                n_died += 1
-            end
-        else
-            # Placeholder until others are made
-            error("Unknown capsule type: $(typeof(cap))")
-        end
-    end
-
-    resize!(persisted, n_persisted)
+    survival_probs = Float64[capsule_survival_probability(prev, cap, params) for cap in prev.capsules]
+    persistence_results ~ capsule_persistence_map(prev.capsules, survival_probs)
+    persisted = MSC[cap for cap in persistence_results if cap !== nothing]
 
     return (
         capsules = persisted,
-        n_died = n_died
+        n_died = length(prev.capsules) - length(persisted)
     )
 end
 
@@ -112,54 +99,15 @@ end
     )
 end
 
-# Detect the first collision capsule. #TODO: this should probably be all capsules, not just the first 
-function first_collision_capsule(capsules::Vector{MSC})
-    @inbounds for cap in capsules
-        cap isa CollisionMSC && return cap
-    end
-    return nothing
+# Pick the per-capsule clause. TODO: this could become a capsule property.
+function msc_clause_branch(cap::MSC)
+    cap isa CollisionMSC && return :collision
+    error("Unknown capsule type: $(typeof(cap))")
 end
 
-# Pick a branch to switch to.
-function msc_physics_branch(capsules::Vector{MSC})
-    return first_collision_capsule(capsules) === nothing ? :no_capsule : :collision
-end
-
-# When there's no collision capsule, just update physics normally. No sampling.
-@gen function msc_no_capsule_clause(prev_objects::BulletState, sim::BulletSim, capsules::Vector{MSC}, params::MSCParams)
-    return PhySMC.step(sim, prev_objects)
-end
-
-# A function that drifts the mass latent during collision
-@gen function msc_collision_mass_drift(ls::RigidBodyLatents, params::MSCParams)
-    prev_mass = ls.data.mass
-    mass ~ trunc_norm(prev_mass, params.collision_mass_drift_std, 0.0, Inf)
-    return update_latents(ls, mass)
-end
-
-# Active collision capsules drift object a's mass before stepping physics.
-@gen function msc_collision_clause(prev_objects::BulletState, sim::BulletSim, capsules::Vector{MSC}, params::MSCParams)
-    cap = first_collision_capsule(capsules)
-    cap === nothing && error("collision clause selected without an active collision capsule")
-    collision = cap::CollisionMSC
-
-    obj_a = {:obj => collision.a} ~ msc_collision_mass_drift(prev_objects.latents[collision.a], params)
-    obj_b = update_latents(prev_objects.latents[collision.b], 1.0)
-
-    # Keep untouched object latents persistent while the active collision drifts mass.
-    new_latents = Vector{BulletElemLatents}(undef, length(prev_objects.latents))
-    copyto!(new_latents, prev_objects.latents)
-    new_latents[collision.a] = obj_a
-    new_latents[collision.b] = obj_b
-
-    updated_objects = Accessors.setproperties(prev_objects; latents=new_latents)
-    return PhySMC.step(sim, updated_objects)
-end
-
-# Switch combinator for clauses 
-const msc_physics_clause = Gen.Switch(
-    MSC_PHYSICS_BRANCHES,
-    msc_no_capsule_clause,
+# Switch combinator for capsule birth clauses.
+const msc_capsule_clause = Gen.Switch(
+    MSC_CLAUSE_BRANCHES,
     msc_collision_clause
 )
 
@@ -168,25 +116,29 @@ const msc_physics_clause = Gen.Switch(
 
     capsule_update ~ capsule_kernel(t, prev, params)
 
-    branch = msc_physics_branch(capsule_update.capsules)
-    next_objects ~ msc_physics_clause(branch, prev.objects, sim, capsule_update.capsules, params)
+    diffed_objects = prev.objects
+    checkpoint_t = prev.last_clause_checkpoint_t
+    checkpoint_msc_id = prev.last_clause_checkpoint_msc_id
+
+    if capsule_update.stats.born
+        cap = capsule_update.capsules[end]
+        branch = msc_clause_branch(cap)
+        capsule_diff = {:msc_switch => cap.id => :clause} ~ msc_capsule_clause(branch, prev.objects, cap, params)
+        diffed_objects = apply_capsule_diffs(prev.objects, CapsuleDiff[capsule_diff])
+        checkpoint_t = t
+        checkpoint_msc_id = cap.id
+    end
+
+    next_objects = PhySMC.step(sim, diffed_objects)
 
     positions ~ Gen.Map(observe)(next_objects.kinematics)
-
-    checkpoint_t = prev.last_mass_checkpoint_t
-    checkpoint_object = prev.last_mass_checkpoint_object
-    if branch == :collision
-        cap = first_collision_capsule(capsule_update.capsules)::CollisionMSC
-        checkpoint_t = t
-        checkpoint_object = cap.a
-    end
 
     return MSCState(
         next_objects,
         capsule_update.capsules,
         capsule_update.stats,
         checkpoint_t,
-        checkpoint_object
+        checkpoint_msc_id
     )
 end
 
@@ -213,24 +165,32 @@ end
 # Rejuvenation proposal for MSC v0
 ################################################################################
 
-# Get the last point in time where the mass variable was sampled 
-function msc_last_mass_checkpoint(tr::Gen.Trace, t::Int)
+# Get the last point in time where an MSC clause sampled a latent.
+function msc_last_clause_checkpoint(tr::Gen.Trace, t::Int)
     states = get_retval(tr)
     state = states[min(t, length(states))]
-    return (state.last_mass_checkpoint_t, state.last_mass_checkpoint_object)
+    return (state.last_clause_checkpoint_t, state.last_clause_checkpoint_msc_id)
 end
 
-# Create a capsule aware proposal for rejuvenation
-@gen function msc_proposal(tr::Gen.Trace, checkpoint_t::Int, object_id::Int)
+@gen function msc_initial_mass_proposal(tr::Gen.Trace, object_id::Int)
     choices = get_choices(tr)
-    if checkpoint_t == 0
-        prev_mass = choices[:latents => :obj1 => :mass]
-        mass = {:latents => :obj1 => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
-    else
-        prev_mass = choices[:states => checkpoint_t => :next_objects => :obj => object_id => :mass]
-        mass = {:states => checkpoint_t => :next_objects => :obj => object_id => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
-    end
+    prev_mass = choices[:latents => :obj => object_id => :mass]
+    mass = {:latents => :obj => object_id => :mass} ~ trunc_norm(prev_mass, 1.0, 0.0, Inf)
     return mass
+end
+
+# Create an MSC-aware rejuvenation move by resampling a clause subtree.
+function msc_proposal_selection(tr::Gen.Trace, checkpoint_t::Int, msc_id::Int)
+    return Gen.select(:states => checkpoint_t => :msc_switch => msc_id => :clause)
+end
+
+function msc_proposal(tr::Gen.Trace, checkpoint_t::Int, msc_id::Int)
+    if checkpoint_t == 0
+        params = get_args(tr)[4]::MSCParams
+        object_id = tracked_mass_object(get_args(tr)[3], params.tracked_mass_object)
+        return Gen.mh(tr, msc_initial_mass_proposal, (object_id,))
+    end
+    return Gen.mh(tr, msc_proposal_selection(tr, checkpoint_t, msc_id))
 end
 
 ################################################################################
@@ -251,66 +211,12 @@ function msc_inference_procedure(gm_args::Tuple,
         Gen.maybe_resample!(state, ess_threshold=particles / 2)
 
         for i in 1:particles, s in 1:rejuv_moves
-            checkpoint = msc_last_mass_checkpoint(state.traces[i], t)
-            state.traces[i], _ = Gen.mh(state.traces[i], msc_proposal, checkpoint)
+            checkpoint = msc_last_clause_checkpoint(state.traces[i], t)
+            state.traces[i], _ = msc_proposal(state.traces[i], checkpoint...)
         end
     end
 
     return Gen.sample_unweighted_traces(state, particles)
-end
-
-function extract_msc_capsules(tr::Gen.Trace, t::Int)
-    return get_retval(tr)[t].capsules
-end
-
-function extract_msc_event_stats(tr::Gen.Trace, t::Int)
-    return get_retval(tr)[t].event_stats
-end
-
-function extract_current_msc_mass(tr::Gen.Trace, t::Int, params::MSCParams=DEFAULT_MSC_PARAMS)
-    object_id = params.tracked_mass_object
-    return Float64(get_retval(tr)[t].objects.latents[object_id].data.mass)
-end
-
-function summarize_msc_masses(traces, t::Int, params::MSCParams=DEFAULT_MSC_PARAMS)
-    ms = Float64[extract_current_msc_mass(tr, t, params) for tr in traces]
-    return (
-        mean = mean(ms),
-        std = std(ms),
-        q25 = quantile(ms, 0.25),
-        q75 = quantile(ms, 0.75),
-        q05 = quantile(ms, 0.05),
-        q95 = quantile(ms, 0.95),
-        masses = ms
-    )
-end
-
-function _mean_active_capsule_age(capsules::Vector{MSC})
-    isempty(capsules) && return 0.0
-    return mean(Float64[cap.age for cap in capsules])
-end
-
-function summarize_msc_capsules(traces, t::Int)
-    capsules_by_trace = [extract_msc_capsules(tr, t) for tr in traces]
-    event_stats = [extract_msc_event_stats(tr, t) for tr in traces]
-    active_counts = [length(capsules) for capsules in capsules_by_trace]
-    active = active_counts .> 0
-
-    birth_events = [stats.born for stats in event_stats]
-    death_counts = [stats.n_died for stats in event_stats]
-    death_events = death_counts .> 0
-    switch_events = birth_events .| death_events
-
-    return (
-        capsule_active_prob = mean(Float64.(active)),
-        capsule_switch_prob = mean(Float64.(switch_events)),
-        capsule_birth_prob = mean(Float64.(birth_events)),
-        capsule_death_prob = mean(Float64.(death_events)),
-        capsule_mean_active_count = mean(Float64.(active_counts)),
-        capsule_mean_death_count = mean(Float64.(death_counts)),
-        capsule_mean_age = mean(Float64[_mean_active_capsule_age(capsules) for capsules in capsules_by_trace]),
-        capsule_mean_birth_probability = mean(Float64[stats.birth_prob for stats in event_stats])
-    )
 end
 
 function msc_inference_with_history(gm_args::Tuple,
@@ -331,11 +237,9 @@ function msc_inference_with_history(gm_args::Tuple,
 
         for i in 1:particles
             for s in 1:rejuv_moves
-                checkpoint = msc_last_mass_checkpoint(state.traces[i], t)
-                state.traces[i], _ = Gen.mh(state.traces[i], msc_proposal, checkpoint)
+                checkpoint = msc_last_clause_checkpoint(state.traces[i], t)
+                state.traces[i], _ = msc_proposal(state.traces[i], checkpoint...)
             end
-            capsules = get_retval(state.traces[i])[t].capsules
-            println("t=$(t), particle=$(i), capsules=$(capsules), log_score=$(Gen.get_score(state.traces[i]))")
         end
 
         current_traces = Gen.sample_unweighted_traces(state, particles)
@@ -363,25 +267,4 @@ function msc_inference_with_history(gm_args::Tuple,
     end
 
     return history
-end
-
-################################################################################
-# Timing spec
-################################################################################
-
-function msc_timing_spec(; label="MSC v0", params::MSCParams=DEFAULT_MSC_PARAMS)
-    return make_pf_timing_spec(
-        label = label,
-        pf_model = msc_model,
-        gm_args_builder = (T, sim, template) -> (T, sim, template, params),
-        online_args = gm_args -> (t -> (t, gm_args[2:4]...)),
-        argdiffs = (UnknownChange(), NoChange(), NoChange(), NoChange()),
-        rejuvenate! = function (state, t, particles, rejuv_moves)
-            for i in 1:particles, s in 1:rejuv_moves
-                checkpoint = msc_last_mass_checkpoint(state.traces[i], t)
-                state.traces[i], _ = Gen.mh(state.traces[i], msc_proposal, checkpoint)
-            end
-            return nothing
-        end
-    )
 end

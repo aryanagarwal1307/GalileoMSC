@@ -1,0 +1,81 @@
+# Single source of truth for human-experiment stimulus settings.
+# Relative appearance masses; physical mass_ratio is ramp mass / table mass.
+# The simulated table object's mass is always normalized to 1.0.
+[materials]
+wood = 1.0
+brick = 2.0
+metal = 4.0
+
+[defaults]
+enabled = true
+# Full dimensions in meters, ordered x/y/z for ramp and table objects.
+obj_ramp_dims = [0.20, 0.20, 0.10]
+obj_table_dims = [0.20, 0.20, 0.10]
+obj_frictions = [0.3, 0.3]
+restitution = 0.5
+# Existing ramp API placement parameters (ramp, table), not world coordinates.
+obj_positions = [0.5, 1.5]
+slope = 0.6666666666666666
+table_ramp_intersection = 0.0
+physics_hz = 240
+video_fps = 60
+# Durations in seconds; timing and seed are consumed by the stimulus runner.
+max_duration = 10.0
+post_collision_duration = 2.0
+seed = 42
+
+[[conditions]]
+condition_id = "wood_to_brick_congruent"
+ramp_material = "wood"
+table_material = "brick"
+mass_ratio = 0.5
+congruent = true
+
+[[conditions]]
+condition_id = "brick_to_wood_congruent"
+ramp_material = "brick"
+table_material = "wood"
+mass_ratio = 2.0
+congruent = true
+
+[[conditions]]
+condition_id = "wood_to_metal_congruent"
+ramp_material = "wood"
+table_material = "metal"
+mass_ratio = 0.25
+congruent = true
+
+[[conditions]]
+condition_id = "metal_to_wood_congruent"
+ramp_material = "metal"
+table_material = "wood"
+mass_ratio = 4.0
+congruent = true
+
+[[conditions]]
+condition_id = "wood_to_metal_violation"
+ramp_material = "wood"
+table_material = "metal"
+mass_ratio = 4.0
+congruent = false
+
+[[conditions]]
+condition_id = "metal_to_wood_violation"
+ramp_material = "metal"
+table_material = "wood"
+mass_ratio = 0.25
+congruent = false
+
+[[conditions]]
+condition_id = "wood_to_brick_violation"
+ramp_material = "wood"
+table_material = "brick"
+mass_ratio = 2.0
+congruent = false
+
+[[conditions]]
+condition_id = "brick_to_wood_violation"
+ramp_material = "brick"
+table_material = "wood"
+mass_ratio = 0.5
+congruent = false
