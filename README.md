@@ -2,6 +2,11 @@
 
 This project is a temporally structured generative model for intuitive physics scenes. 
 
+## Four-trial visual prototype
+
+The participant-facing web prototype, its configuration, and its run instructions
+are in [`experiment/`](experiment/README.md).
+
 Build all eight complete experimental videos with
 `python stimuli/build_stimuli.py --all`. See the
 [stimulus build guide](stimuli/README.md) for the editable master parameters,
