@@ -68,6 +68,22 @@ export function validateExperiment(config: ExperimentConfig, manifest: VideoMani
       config.violationProbeChoices.some((probe) => probe !== "collision" && probe !== "postCollision")) {
     errors.push("Violation probes must be collision and/or postCollision.");
   }
+  const practice = config.onboarding.practice;
+  if (!ordinary.some((scene) => scene.sceneId === practice.sceneId)) {
+    errors.push("Practice sceneId must identify one configured ordinary scene.");
+  }
+  if (!names.includes(practice.probe)) {
+    errors.push("Practice probe must be one of the configured probe positions.");
+  }
+  if (config.onboarding.quiz.questions.length !== 2 ||
+      config.onboarding.quiz.questions.some((question) => question.options.length < 2 ||
+        !Number.isInteger(question.correctIndex) || question.correctIndex < 0 ||
+        question.correctIndex >= question.options.length)) {
+    errors.push("Configure two quiz questions with valid answer indexes.");
+  }
+  if (!Number.isInteger(config.onboarding.countdown.seconds) || config.onboarding.countdown.seconds < 1) {
+    errors.push("Countdown seconds must be a positive whole number.");
+  }
   const slider = config.slider;
   if (!(slider.min < 0 && slider.max > 0 && slider.step > 0 &&
         slider.initialMean >= slider.min && slider.initialMean <= slider.max && slider.maxMultiple > 1 &&

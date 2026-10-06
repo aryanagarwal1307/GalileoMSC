@@ -22,6 +22,7 @@ let previewPlan: HTMLElement | null = null;
 let activeReplay: (() => void) | null = null;
 let selectedGroup: GroupName = groups.includes(requestedGroup as GroupName) ? requestedGroup as GroupName : "1";
 let jsPsych: JsPsych;
+let quizPassed = false;
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", text = ""): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -64,6 +65,11 @@ function showPreviewPlan(plan: Assignment[], currentIndex = -1): void {
     list.append(item);
   });
   previewPlan.append(list);
+}
+
+function setReplayAvailable(available: boolean): void {
+  const replay = (previewPanel as (HTMLElement & { replayButton?: HTMLButtonElement }) | null)?.replayButton;
+  if (replay) replay.disabled = !available;
 }
 
 function showStart(error = ""): void {
@@ -171,6 +177,12 @@ async function startExperiment(card: HTMLElement, button: HTMLButtonElement, sta
     return;
   }
   const plan = planFor(selectedGroup);
+  const practiceScene = config.scenes.find((scene) => scene.sceneId === config.onboarding.practice.sceneId)!;
+  const practiceAssignment: Assignment = {
+    scene: practiceScene,
+    probe: config.onboarding.practice.probe,
+    frame: config.probeFrames[config.onboarding.practice.probe],
+  };
   app.replaceChildren();
   const shell = element("div", "experiment-shell");
   const participant = element("section", "participant-surface");
@@ -212,22 +224,29 @@ async function startExperiment(card: HTMLElement, button: HTMLButtonElement, sta
     on_data_update: () => jsPsych.data.reset(),
     on_finish: () => {
       activeReplay = null;
-      if (previewPanel) {
-        const replay = (previewPanel as HTMLElement & { replayButton?: HTMLButtonElement }).replayButton;
-        if (replay) replay.disabled = true;
-      }
+      setReplayAvailable(false);
       participant.replaceChildren(element("div", "complete-screen", config.completionMessage));
       for (const url of videoUrls.values()) URL.revokeObjectURL(url);
       videoUrls.clear();
     },
   });
+  quizPassed = false;
   jsPsych.run([
-    { type: IntroPlugin },
+    {
+      timeline: [
+        { type: IntroPlugin, on_start: () => { activeReplay = null; setReplayAvailable(false); } },
+        { type: SceneTrialPlugin, assignment: practiceAssignment, index: -1, practice: true,
+          on_start: () => { showPreviewPlan(plan); setReplayAvailable(true); } },
+        { type: QuizPlugin, on_start: () => { activeReplay = null; setReplayAvailable(false); } },
+      ],
+      loop_function: () => !quizPassed,
+    },
+    { type: CountdownPlugin },
     ...plan.map((assignment, index) => ({ type: SceneTrialPlugin, assignment, index, on_start: () => {
       showPreviewPlan(plan, index);
-      const replay = (previewPanel as (HTMLElement & { replayButton?: HTMLButtonElement }) | null)?.replayButton;
-      if (replay) replay.disabled = false;
+      setReplayAvailable(true);
     } })),
+    { type: DebriefPlugin, on_start: () => { activeReplay = null; setReplayAvailable(false); } },
   ] as any);
   card.remove();
 }
@@ -236,12 +255,116 @@ class IntroPlugin {
   static info = { name: "prototype-intro", version: "1.0.0", parameters: {}, data: {} };
   constructor(private jsPsych: JsPsych) {}
   trial(display: HTMLElement): void {
-    const screen = element("div", "intro-screen");
-    screen.append(element("h1", "", config.instructions.title));
-    screen.append(element("p", "intro-copy", config.instructions.body));
-    const button = element("button", "primary-button", config.instructions.startButton);
-    button.addEventListener("click", () => this.jsPsych.finishTrial({}));
-    screen.append(button);
+    const pages = [config.onboarding.welcome, ...config.onboarding.instructionPages];
+    let pageIndex = 0;
+    const showPage = () => {
+      const page = pages[pageIndex];
+      const screen = element("div", "intro-screen");
+      if (pageIndex > 0) screen.append(element("p", "eyebrow", `Instructions ${pageIndex} of ${pages.length - 1}`));
+      screen.append(element("h1", "", page.title));
+      for (const paragraph of page.paragraphs) screen.append(element("p", "intro-copy", paragraph));
+      const button = element("button", "primary-button", config.onboarding.nextButton);
+      button.addEventListener("click", () => {
+        pageIndex++;
+        if (pageIndex < pages.length) showPage();
+        else this.jsPsych.finishTrial({});
+      });
+      screen.append(button);
+      display.replaceChildren(screen);
+    };
+    showPage();
+  }
+}
+
+class QuizPlugin {
+  static info = { name: "prototype-quiz", version: "1.0.0", parameters: {}, data: {} };
+  constructor(private jsPsych: JsPsych) {}
+  trial(display: HTMLElement): void {
+    const screen = element("div", "quiz-screen");
+    screen.append(element("h1", "", config.onboarding.quiz.title));
+    const selected: Array<number | null> = config.onboarding.quiz.questions.map(() => null);
+    const submit = element("button", "primary-button", config.onboarding.quiz.submitButton) as HTMLButtonElement;
+    submit.disabled = true;
+    config.onboarding.quiz.questions.forEach((question, questionIndex) => {
+      const group = element("fieldset", "quiz-question");
+      group.append(element("legend", "", question.prompt));
+      question.options.forEach((option, optionIndex) => {
+        const label = element("label", "quiz-option");
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = `quiz-question-${questionIndex}`;
+        radio.value = String(optionIndex);
+        radio.addEventListener("change", () => {
+          selected[questionIndex] = optionIndex;
+          submit.disabled = selected.some((answer) => answer === null);
+        });
+        label.append(radio, document.createTextNode(option));
+        group.append(label);
+      });
+      screen.append(group);
+    });
+    submit.addEventListener("click", () => {
+      const correct = selected.every((answer, index) => answer === config.onboarding.quiz.questions[index].correctIndex);
+      if (correct) {
+        quizPassed = true;
+        this.jsPsych.finishTrial({});
+      } else {
+        quizPassed = false;
+        screen.replaceChildren(element("p", "intro-copy", config.onboarding.quiz.retryMessage));
+        const retry = element("button", "primary-button", config.onboarding.quiz.retryButton);
+        retry.addEventListener("click", () => this.jsPsych.finishTrial({}));
+        screen.append(retry);
+      }
+    });
+    screen.append(submit);
+    display.replaceChildren(screen);
+  }
+}
+
+class CountdownPlugin {
+  static info = { name: "prototype-countdown", version: "1.0.0", parameters: {}, data: {} };
+  constructor(private jsPsych: JsPsych) {}
+  trial(display: HTMLElement): void {
+    const screen = element("div", "countdown-screen");
+    const number = element("div", "countdown-number");
+    screen.append(element("h1", "", config.onboarding.countdown.title), number);
+    display.replaceChildren(screen);
+    const deadline = performance.now() + config.onboarding.countdown.seconds * 1000;
+    const tick = () => {
+      const remaining = Math.ceil((deadline - performance.now()) / 1000);
+      if (remaining <= 0) {
+        clearInterval(interval);
+        this.jsPsych.finishTrial({});
+      } else {
+        number.textContent = String(remaining);
+      }
+    };
+    const interval = window.setInterval(tick, 100);
+    tick();
+  }
+}
+
+class DebriefPlugin {
+  static info = { name: "prototype-debrief", version: "1.0.0", parameters: {}, data: {} };
+  constructor(private jsPsych: JsPsych) {}
+  trial(display: HTMLElement): void {
+    const screen = element("div", "debrief-screen");
+    screen.append(element("h1", "", config.onboarding.debrief.title));
+    screen.append(element("p", "", config.onboarding.debrief.optionalNote));
+    for (const prompt of [config.onboarding.debrief.strategyQuestion, config.onboarding.debrief.commentsQuestion]) {
+      const label = element("label", "debrief-question", prompt);
+      const answer = document.createElement("textarea");
+      answer.rows = 4;
+      answer.autocomplete = "off";
+      label.append(answer);
+      screen.append(label);
+    }
+    const finish = element("button", "primary-button", config.onboarding.debrief.finishButton);
+    finish.addEventListener("click", () => {
+      screen.replaceChildren();
+      this.jsPsych.finishTrial({});
+    });
+    screen.append(finish);
     display.replaceChildren(screen);
   }
 }
@@ -253,11 +376,13 @@ class SceneTrialPlugin {
     parameters: {
       assignment: { type: ParameterType.OBJECT, default: undefined },
       index: { type: ParameterType.INT, default: undefined },
+      practice: { type: ParameterType.BOOL, default: false },
     },
     data: {},
   };
   constructor(private jsPsych: JsPsych) {}
-  trial(display: HTMLElement, trial: { assignment: Assignment; index: number }): void {
+  trial(display: HTMLElement, trial: { assignment: Assignment; index: number; practice?: boolean }): void {
+    const trialLabel = trial.practice ? config.onboarding.practice.label : `Trial ${trial.index + 1} of 4`;
     let generation = 0;
     let timer: number | null = null;
     let animation: number | null = null;
@@ -290,7 +415,7 @@ class SceneTrialPlugin {
     const response = () => {
       clean();
       const screen = element("div", "response-screen");
-      screen.append(element("p", "eyebrow", `Trial ${trial.index + 1} of 4`));
+      screen.append(element("p", "eyebrow", trialLabel));
       screen.append(element("h2", "", config.instructions.responseQuestion));
       const continueButton = element("button", "primary-button", config.instructions.continueButton) as HTMLButtonElement;
       continueButton.disabled = true;
@@ -298,8 +423,7 @@ class SceneTrialPlugin {
       screen.append(continueButton);
       continueButton.addEventListener("click", () => {
         activeReplay = null;
-        const replay = (previewPanel as (HTMLElement & { replayButton?: HTMLButtonElement }) | null)?.replayButton;
-        if (replay) replay.disabled = true;
+        setReplayAvailable(false);
         this.jsPsych.finishTrial({});
       });
       display.replaceChildren(screen);
@@ -309,7 +433,7 @@ class SceneTrialPlugin {
       const source = videoUrls.get(trial.assignment.scene.video);
       if (!source) { fail("The required video is unavailable. Reload the prototype."); return; }
       const screen = element("div", "video-screen");
-      screen.append(element("p", "eyebrow", `Trial ${trial.index + 1} of 4`));
+      screen.append(element("p", "eyebrow", trialLabel));
       const stage = element("div", "video-stage");
       const canvas = element("canvas") as HTMLCanvasElement;
       canvas.width = 960;
@@ -392,7 +516,7 @@ class SceneTrialPlugin {
       clean();
       const run = generation;
       const screen = element("div", "fixation-screen");
-      screen.append(element("p", "eyebrow", `Trial ${trial.index + 1} of 4`));
+      screen.append(element("p", "eyebrow", trialLabel));
       screen.append(element("div", "fixation-mark", config.instructions.ready));
       display.replaceChildren(screen);
       timer = window.setTimeout(() => play(run), config.fixationMs);

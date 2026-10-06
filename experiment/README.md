@@ -18,6 +18,17 @@ screen also has a group selector. Preview mode shows the shuffled trial order,
 lets you replay the current trial, switch groups, and restart. Normal mode hides
 those controls.
 
+After loading, participants see a welcome page and short task instructions,
+followed by a practice trial using one ordinary video. The practice trial
+pauses after the collision and uses the same mass and confidence sliders as the
+main trials. Two multiple-choice questions follow. Both must be correct to
+continue; otherwise the welcome, instructions, and practice repeat. The four
+main trials then run as before. An optional two-question debrief appears before
+the completion message.
+After both quiz answers are correct, a five-second countdown leads into the
+first trial's fixation screen. On each response screen, participants must move
+both the mass and confidence sliders before Continue is enabled.
+
 Edit **[`app/experiment.config.ts`](app/experiment.config.ts)** for video names,
 scene IDs, ordinary/violation status, the three group rotations, probe frames,
 the final trial's random collision/post-collision choices, instructions, response
@@ -29,6 +40,10 @@ zero-based MP4 frames. In the current metadata, first contact is frame 79 at
 videos have no start hold. If you rebuild them with holds, update the probe
 frames by the manifest's trajectory-frame offset. `npm run build` checks that
 configured video files exist and that probe frames fit their manifest entries.
+The `onboarding` section of the same file contains the welcome and instruction
+pages, practice scene and probe, quiz questions and correct answer indexes, and
+countdown duration (`countdown.seconds`), and optional debrief prompts. The practice scene may reuse an ordinary video; it
+does not change the four main-trial assignments.
 
 The mass slider's negative positions mean the ramp object is heavier; positive
 positions mean the table object is heavier. Zero means equal mass. The separate
@@ -47,5 +62,6 @@ build with instructors, upload the **contents** of `experiment/dist/` to a
 static web host and send its URL. Serve it over HTTP(S); opening `index.html`
 directly as `file://` is unsupported.
 
-This is a visual prototype: it records no responses. Data recording and JATOS
+This is a visual prototype: it records no slider, quiz, or debrief responses.
+The debrief text is discarded when Finish is clicked. Data recording and JATOS
 integration remain future work.

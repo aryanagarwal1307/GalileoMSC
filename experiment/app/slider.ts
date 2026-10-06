@@ -82,6 +82,9 @@ export function createMassResponseControl(settings: SliderSettings, words: Wordi
   }
   confidenceControl.append(confidenceHeading, confidence, confidenceScale);
 
+  let meanMoved = false;
+  let confidenceMoved = false;
+
   const render = () => {
     const estimate = Number(mean.value);
     const confidencePercent = Number(confidence.value);
@@ -105,8 +108,16 @@ export function createMassResponseControl(settings: SliderSettings, words: Wordi
       : `${words.tableObjectName} ${multiplier} heavier than ${words.rampObjectName}`);
     confidenceValue.textContent = `${confidencePercent}${settings.valueUnit}`;
   };
-  mean.addEventListener("input", () => { render(); onInteract(); });
-  confidence.addEventListener("input", () => { render(); onInteract(); });
+  mean.addEventListener("input", () => {
+    meanMoved = true;
+    render();
+    if (confidenceMoved) onInteract();
+  });
+  confidence.addEventListener("input", () => {
+    confidenceMoved = true;
+    render();
+    if (meanMoved) onInteract();
+  });
   root.append(readout, track, labels, confidenceControl);
   render();
   return root;
