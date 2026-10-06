@@ -64,7 +64,7 @@ export const experimentConfig = {
       {
         title: "Instructions",
         paragraphs: [
-          "This task can be challenging. Sometimes you will be certain about what you saw; other times you may not be. Give your best estimate each time.",
+          "This task can be challenging. Sometimes you will be certain about your response; other times you may not be. Give your best estimate each time.",
           "There are four short trials. Please stay focused while each scene plays.",
         ],
       },
@@ -112,7 +112,7 @@ export const experimentConfig = {
         },
       ],
       submitButton: "Continue",
-      retryMessage: "Please review the instructions and practice scene, then try again.",
+      retryMessage: "You answered one or more questions incorrectly. Please review the instructions and practice scene, then try again.",
       retryButton: "Review instructions",
     },
     countdown: {

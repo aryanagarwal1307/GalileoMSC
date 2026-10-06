@@ -2,9 +2,14 @@ import type { ExperimentConfig } from "./experiment.config";
 
 type SliderSettings = ExperimentConfig["slider"];
 type Wording = ExperimentConfig["instructions"];
+export type SliderResponse = { massEstimate: number; confidence: number; heavierObject: "ramp" | "table" | "equal"; massRatio: number };
 
-/** DOM-only mass and confidence controls. Neither response is stored. */
-export function createMassResponseControl(settings: SliderSettings, words: Wording, onInteract: () => void): HTMLElement {
+/** Mass and confidence controls; the caller reads values only when Continue is clicked. */
+export function createMassResponseControl(
+  settings: SliderSettings,
+  words: Wording,
+  onInteract: (control: "mass" | "confidence", bothMoved: boolean) => void,
+): { element: HTMLElement; getResponse: () => SliderResponse } {
   const root = document.createElement("div");
   root.className = "interval-control";
 
@@ -111,14 +116,27 @@ export function createMassResponseControl(settings: SliderSettings, words: Wordi
   mean.addEventListener("input", () => {
     meanMoved = true;
     render();
-    if (confidenceMoved) onInteract();
+    onInteract("mass", confidenceMoved);
   });
   confidence.addEventListener("input", () => {
     confidenceMoved = true;
     render();
-    if (meanMoved) onInteract();
+    onInteract("confidence", meanMoved);
   });
   root.append(readout, track, labels, confidenceControl);
   render();
-  return root;
+  return {
+    element: root,
+    getResponse: () => {
+      const massEstimate = Number(mean.value);
+      const confidenceValue = Number(confidence.value);
+      const sideMaximum = massEstimate < 0 ? -settings.min : settings.max;
+      return {
+        massEstimate,
+        confidence: confidenceValue,
+        heavierObject: massEstimate < 0 ? "ramp" : massEstimate > 0 ? "table" : "equal",
+        massRatio: 1 + Math.abs(massEstimate) / sideMaximum * (settings.maxMultiple - 1),
+      };
+    },
+  };
 }

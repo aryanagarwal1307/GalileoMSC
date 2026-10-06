@@ -1,6 +1,6 @@
-# Four-trial visual prototype
+# Relative mass experiment
 
-This TypeScript/Vite/jsPsych 8 prototype uses the existing MP4s in
+This TypeScript/Vite/jsPsych 8 experiment uses the existing MP4s in
 `../stimuli/generated/videos/`. Those files and `video_manifest.json` must be
 present locally. From this `experiment/` directory, with Node.js and npm:
 
@@ -14,7 +14,13 @@ npm run preview   # serves dist/ locally
 From the repository root, first run `cd experiment`. Open `/?preview=1` for
 researcher controls and assignments. Use `/?condition_group=1`, `2`, or `3` to
 preselect a group; combine them as `/?preview=1&condition_group=2`. The start
-screen also has a group selector. Preview mode shows the shuffled trial order,
+screen has a group selector in local and preview runs. In an ordinary JATOS
+run, one group is assigned at random and the selector is hidden. A
+`condition_group` parameter on the JATOS launch URL overrides that assignment
+for testing. This is independent random assignment, not a quota-balanced
+allocation across participants. JATOS participants see a brief video-loading
+message and then the welcome page automatically, with no Start button.
+Preview mode shows the shuffled trial order,
 lets you replay the current trial, switch groups, and restart. Normal mode hides
 those controls.
 
@@ -57,11 +63,46 @@ configured frame; older browsers use `currentTime` with an animation-frame
 check. A canvas masks the source video, so late callbacks cannot reveal later
 frames. After the cut, the video element is removed and the canvas holds the
 last displayed frame for `freezeFrameMs` before the slider appears. A busy
-browser may cut one displayed frame early. To share the
-build with instructors, upload the **contents** of `experiment/dist/` to a
-static web host and send its URL. Serve it over HTTP(S); opening `index.html`
-directly as `file://` is unsupported.
+browser may cut one displayed frame early.
 
-This is a visual prototype: it records no slider, quiz, or debrief responses.
-The debrief text is discarded when Finish is clicked. Data recording and JATOS
-integration remain future work.
+## JATOS setup
+
+The build contains `index.html`, the bundled app, fonts, and MP4s. JATOS serves
+`jatos.js` automatically, so that file is intentionally absent from `dist/`.
+In your local JATOS GUI, create a study and copy the **contents** of
+`experiment/dist/` into that study's assets directory under
+`/Users/aryanagarwal/Downloads/jatos/study_assets_root/`. Add one component
+whose HTML file is `index.html`, then run that component through JATOS. Do not
+copy files into `study_assets_root/` before creating the study: JATOS creates a
+separate assets directory for each study. The downloaded JATOS installation is
+not modified by this repository.
+
+JATOS must initialize before the experiment starts. At completion, the app
+submits `jsPsych.data.get().json()` and ends the study without redirecting away
+from the completion message. If submission fails, the page offers a retry and
+keeps the data in memory. The JATOS launch URL may include `PROLIFIC_PID`,
+`STUDY_ID`, and `SESSION_ID`; missing values are recorded as `null`. No Prolific
+redirect is implemented.
+
+## Recorded data
+
+Each JATOS result is a JSON array of jsPsych records. Every record includes a
+schema version, run ID, counterbalancing group, Prolific IDs, JATOS IDs, and
+preview status. The `session` record contains the randomized trial order,
+timing and slider settings, preload errors, and browser information.
+`scene_trial` records contain the scene, video, `behavioral_trial_type`
+(ordinary/violation/practice), probe, requested frame and time, observed cut frame and time, last canvas
+frame shown, stop method, playback attempts and errors, mass estimate, mass
+ratio, confidence, and response timings. `comprehension_quiz` records contain
+each attempt and answer; `debrief` contains the optional text responses; the
+`summary` contains the number of quiz attempts and instruction loops. Time
+durations are in milliseconds, video times in seconds, and timestamps are UTC.
+On a time-based fallback, frame numbers are estimates from the manifest FPS.
+The `group_assignment_method` field identifies a random assignment, URL
+override, or researcher selection.
+
+Outside JATOS, including `npm run dev`, `npm run preview`, and a static host,
+the experiment runs but does not save or submit data. Data remains in memory
+until the page is refreshed. A static host is suitable for instructor review;
+use JATOS to record results. Serve the build over HTTP(S), since opening
+`index.html` directly as `file://` is unsupported.
