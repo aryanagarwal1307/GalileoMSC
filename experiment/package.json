@@ -1,0 +1,20 @@
+{
+  "name": "galileo-visual-prototype",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@fontsource/literata": "^5.3.0",
+    "jspsych": "^8.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.0"
+  }
+}
