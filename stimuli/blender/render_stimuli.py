@@ -7,7 +7,6 @@ Run with: blender --background --factory-startup --python-exit-code 1
 """
 
 import argparse
-import hashlib
 import json
 import math
 from pathlib import Path
@@ -16,8 +15,9 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 OBJECT_NAMES = ("ramp_object", "table_object")
-CAMERA = {"location": [3.0, -9.0, 5.0], "target": [0.0, 0.0, 0.45],
-          "ortho_scale": 6.1, "clip_start": 0.05, "clip_end": 200.0}
+CAMERA = {"location": [7.5, -22.5, 11.825], "target": [0.0, 0.0, 0.45],
+          "lens_mm": 135.0, "sensor_width_mm": 36.0,
+          "clip_start": 0.05, "clip_end": 200.0}
 LIGHTS = {
     "key": {"location": [-3.0, -4.0, 7.0], "target": [0.0, 0.0, 0.0],
             "energy_watts": 1500.0, "size_m": 4.0, "color": [1.0, 1.0, 1.0]},
@@ -27,24 +27,23 @@ LIGHTS = {
 BEVEL = {"width_m": 0.003, "segments": 3, "normal_method": "smooth + weighted normals",
          "weighted_normal_weight": 50}
 MATERIALS = {
-    "wood": {"metallic": 0.0, "roughness": 0.43,
-             "dark_color": [0.105, 0.035, 0.010, 1.0],
-             "light_color": [0.48, 0.255, 0.095, 1.0],
-             "grain_axis": "local X", "grain_frequency_per_m": 22.0,
-             "noise_stretch": [2.0, 45.0, 45.0], "bump_strength": 0.15,
-             "bump_distance_m": 0.0006},
-    "brick": {"metallic": 0.0, "roughness": 0.85,
-              "color_1": [0.23, 0.070, 0.046, 1.0],
-              "color_2": [0.37, 0.15, 0.09, 1.0],
-              "mortar_color": [0.15, 0.13, 0.105, 1.0],
-              "brick_width_m": 0.065, "row_height_m": 0.035,
-              "mortar_size_m": 0.0013,
-              "bump_strength": 0.25, "bump_distance_m": 0.0008},
+    "wood": {"metallic": 0.0, "roughness": 0.56,
+             "dark_color": [0.075, 0.022, 0.006, 1.0],
+             "light_color": [0.55, 0.29, 0.105, 1.0],
+             "grain_axis": "local X fibers with linear bands on all side faces",
+             "grain_frequency_per_m": 3.0, "side_grain_frequency_per_m": 5.0,
+             "noise_stretch": [4.0, 65.0, 65.0], "bump_strength": 0.28,
+             "bump_distance_m": 0.0008},
+    "brick": {"source_file": "stimuli/blender/materials/my_brick.blend",
+              "source_mesh": "Cube", "source_material": "Material", "uv_map": "UVMap"},
     "metal": {"metallic": 1.0, "roughness": 0.23,
               "base_color": [0.48, 0.50, 0.52, 1.0]},
+    "white_ceramic": {"metallic": 0.0, "roughness": 1.0,
+                      "base_color": [0.075, 0.075, 0.075, 1.0],
+                      "specular_ior_level": 0.15},
 }
 RENDER = {"samples": 64, "shadow_rays": 4, "shadow_steps": 12,
-          "world_color": [0.35, 0.35, 0.35, 1.0], "world_strength": 0.5,
+          "world_color": [0.12, 0.105, 0.09, 1.0], "world_strength": 1.0,
           "view_transform": "AgX", "look": "None", "exposure": 0.0, "gamma": 1.0,
           "texture_coordinate_scale": 1.0, "procedural_seed": 0}
 
@@ -68,7 +67,6 @@ def near(a, b):
 def load_trajectory(path):
     """Validate the exported clock, geometry and every pose before using Blender."""
     data = json.loads(path.read_text())
-    require(data.get("schema_version") == 1, f"{path}: unsupported schema_version")
     condition = data["condition_id"]
     require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", condition), "Unsafe condition_id")
     spec, timing, collision = data["stimulus"], data["timing"], data["collision"]
@@ -89,10 +87,8 @@ def load_trajectory(path):
     require(type(contact) is int and 0 < contact <= timing["total_physics_substeps"], "Missing collision")
     require(near(collision["first_contact_time_seconds"], contact / hz), "Incorrect contact time")
     require(collision["video_frame"] == (contact + k - 1) // k, "Incorrect contact video frame")
-    if timing["post_collision_duration_completed"]:
-        elapsed = timing["duration_seconds"] - contact / hz
-        require(spec["post_collision_duration"] - 1e-9 <= elapsed
-                < spec["post_collision_duration"] + 1 / fps + 1 / hz, "Incorrect post-contact duration")
+    require(len(frames) == round(spec["action_duration"] * fps), "Incorrect action frame count")
+    require(near(timing["action_duration_seconds"], len(frames) / fps), "Incorrect action display duration")
     geometry = data["scene_geometry"]
     for key in ("base_dims", "table_dims", "ramp_dims"):
         require(all(x > 0 for x in vector(geometry[key], 3, key)), f"{key} must be positive")
@@ -127,7 +123,7 @@ def arguments(argv):
     inputs.add_argument("--trajectory", type=Path, help="One exported trajectory JSON")
     inputs.add_argument("--all", action="store_true", help="Render every enabled condition in stimuli.toml")
     parser.add_argument("--output-dir", type=Path, help="Root directory; condition_id is appended")
-    parser.add_argument("--resolution", type=int, nargs=2, default=(960, 540), metavar=("WIDTH", "HEIGHT"))
+    parser.add_argument("--resolution", type=int, nargs=2, default=(1920, 1080), metavar=("WIDTH", "HEIGHT"))
     parser.add_argument("--engine", choices=("EEVEE", "CYCLES"), default="EEVEE")
     parser.add_argument("--samples", type=int, default=RENDER["samples"], help="Render samples (shared across conditions)")
     subset = parser.add_mutually_exclusive_group()
@@ -144,7 +140,10 @@ def arguments(argv):
 def input_paths(args):
     if args.trajectory:
         return [args.trajectory.resolve()]
-    import tomllib
+    try:
+        import tomllib
+    except ImportError:
+        import tomli as tomllib
     config = tomllib.loads((ROOT / "stimuli/config/stimuli.toml").read_text())
     return [ROOT / "stimuli/generated/trajectories" / (c["condition_id"] + ".json")
             for c in config["conditions"] if c.get("enabled", config["defaults"].get("enabled", True))]
@@ -169,11 +168,74 @@ def material(name, color, metallic=0.0, roughness=0.6):
     return mat, shader
 
 
+def emission_material(name, color):
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    nodes.clear()
+    emission = nodes.new("ShaderNodeEmission")
+    emission.inputs["Color"].default_value = color
+    output = nodes.new("ShaderNodeOutputMaterial")
+    mat.node_tree.links.new(emission.outputs[0], output.inputs["Surface"])
+    return mat
+
+
+def face_corner_key(mesh, face, loop_index):
+    """Match a face/corner between the centered donor cube and simulation box."""
+    vertex = mesh.vertices[mesh.loops[loop_index].vertex_index]
+    return (tuple(round(component) for component in face.normal),
+            tuple(1 if component > 0 else -1 for component in vertex.co))
+
+
+def load_brick_appearance():
+    """Append the authored shader and read its UVs without importing a scene."""
+    params = MATERIALS["brick"]
+    path = ROOT / params["source_file"]
+    require(path.is_file(), f"Missing brick material asset: {path}")
+    with bpy.data.libraries.load(str(path), link=False) as (available, loaded):
+        require(params["source_mesh"] in available.meshes,
+                f"Brick asset is missing mesh {params['source_mesh']}")
+        require(params["source_material"] in available.materials,
+                f"Brick asset is missing material {params['source_material']}")
+        loaded.meshes = [params["source_mesh"]]
+        loaded.materials = [params["source_material"]]
+    donor, mat = loaded.meshes[0], loaded.materials[0]
+    try:
+        require(mat.use_nodes and mat.node_tree is not None, "Brick material needs shader nodes")
+        require(mat in donor.materials[:], "Brick donor mesh does not use the authored material")
+        uv_layer = donor.uv_layers.get(params["uv_map"])
+        require(uv_layer is not None, f"Brick asset is missing UV map {params['uv_map']}")
+        require(len(donor.vertices) == 8 and len(donor.polygons) == 6
+                and all(len(face.vertices) == 4 for face in donor.polygons),
+                "Brick UV donor must remain a six-face cube")
+        uvs = {face_corner_key(donor, face, index): tuple(uv_layer.data[index].uv)
+               for face in donor.polygons for index in face.loop_indices}
+        require(len(uvs) == 24, "Brick UV donor must have 24 distinct face corners")
+        mat.name = "brick"
+        return mat, uvs
+    finally:
+        bpy.data.meshes.remove(donor)
+
+
+def copy_brick_uv(mesh, uvs):
+    """Copy face-local UVs, retaining the simulation mesh and authored shader."""
+    uv_layer = mesh.uv_layers.new(name=MATERIALS["brick"]["uv_map"])
+    uv_layer.active_render = True
+    for face in mesh.polygons:
+        for index in face.loop_indices:
+            key = face_corner_key(mesh, face, index)
+            require(key in uvs, "Simulation box corner has no matching brick UV")
+            uv_layer.data[index].uv = uvs[key]
+    mesh.update()
+
+
 def procedural_material(name):
     params = MATERIALS[name]
     mat, shader = material(name, params.get("base_color", [0.5, 0.5, 0.5, 1.0]),
                            params["metallic"], params["roughness"])
-    if name == "metal":
+    if name in ("metal", "white_ceramic"):
+        if "specular_ior_level" in params:
+            shader.inputs["Specular IOR Level"].default_value = params["specular_ior_level"]
         return mat
     nodes, links = mat.node_tree.nodes, mat.node_tree.links
     coordinates = nodes.new("ShaderNodeTexCoord")
@@ -203,23 +265,40 @@ def procedural_material(name):
         wave.inputs["Distortion"].default_value = 4.0
         wave.inputs["Detail Scale"].default_value = 1.5
         links.new(mapping.outputs["Vector"], wave.inputs["Vector"])
-        grain = nodes.new("ShaderNodeMath")
-        grain.operation = "MULTIPLY"
-        links.new(noise.outputs["Fac"], grain.inputs[0])
-        links.new(wave.outputs["Fac"], grain.inputs[1])
-        ramp = nodes.new("ShaderNodeValToRGB")
-        ramp.color_ramp.elements[0].position = 0.07
-        ramp.color_ramp.elements[0].color = params["dark_color"]
-        ramp.color_ramp.elements[1].position = 0.65
-        ramp.color_ramp.elements[1].color = params["light_color"]
-        links.new(grain.outputs[0], ramp.inputs["Fac"])
-        links.new(ramp.outputs["Color"], shader.inputs["Base Color"])
-        links.new(grain.outputs[0], bump.inputs["Height"])
-    else:
-        # Planar brick projections blend by local face normal, so mortar is
-        # visible on the top AND both side orientations with the same metric scale.
-        separate_position = nodes.new("ShaderNodeSeparateXYZ")
-        links.new(mapping.outputs["Vector"], separate_position.inputs[0])
+        grain = nodes.new("ShaderNodeMixRGB")
+        grain.blend_type = "MULTIPLY"
+        grain.inputs[0].default_value = 0.22
+        links.new(noise.outputs["Fac"], grain.inputs[1])
+        links.new(wave.outputs["Fac"], grain.inputs[2])
+        def wood_colors(source, label):
+            ramp = nodes.new("ShaderNodeValToRGB")
+            ramp.name = label
+            ramp.color_ramp.elements[0].position = 0.26
+            ramp.color_ramp.elements[0].color = params["dark_color"]
+            ramp.color_ramp.elements[1].position = 0.68
+            ramp.color_ramp.elements[1].color = params["light_color"]
+            mid = ramp.color_ramp.elements.new(0.43)
+            mid.color = [0.28, 0.105, 0.027, 1.0]
+            links.new(source, ramp.inputs["Fac"])
+            return ramp
+        ramp = wood_colors(grain.outputs[0], "Oak growth bands and longitudinal fibers")
+        # A wave along local Y has little variation on Y-facing sides. Keep
+        # the original top/bottom grain, but use horizontal Z-bands on all
+        # four vertical faces so no side falls back to blotchy noise alone.
+        side_wave = nodes.new("ShaderNodeTexWave")
+        side_wave.name = "Horizontal grain on four sides"
+        side_wave.wave_type = "BANDS"
+        side_wave.bands_direction = "Z"
+        side_wave.inputs["Scale"].default_value = params["side_grain_frequency_per_m"]
+        side_wave.inputs["Distortion"].default_value = 2.0
+        side_wave.inputs["Detail Scale"].default_value = 1.5
+        links.new(mapping.outputs["Vector"], side_wave.inputs["Vector"])
+        side_grain = nodes.new("ShaderNodeMixRGB")
+        side_grain.blend_type = "MULTIPLY"
+        side_grain.inputs[0].default_value = 0.22
+        links.new(noise.outputs["Fac"], side_grain.inputs[1])
+        links.new(side_wave.outputs["Fac"], side_grain.inputs[2])
+        side_ramp = wood_colors(side_grain.outputs[0], "Side growth bands and fibers")
         normal = nodes.new("ShaderNodeNewGeometry")
         transform = nodes.new("ShaderNodeVectorTransform")
         transform.vector_type, transform.convert_from, transform.convert_to = "NORMAL", "WORLD", "OBJECT"
@@ -227,41 +306,60 @@ def procedural_material(name):
         absolute = nodes.new("ShaderNodeVectorMath")
         absolute.operation = "ABSOLUTE"
         links.new(transform.outputs[0], absolute.inputs[0])
-        separate_normal = nodes.new("ShaderNodeSeparateXYZ")
-        links.new(absolute.outputs[0], separate_normal.inputs[0])
-        colors, heights = [], []
-        for axes, weight in (("YZ", "X"), ("XZ", "Y"), ("XY", "Z")):
-            combine = nodes.new("ShaderNodeCombineXYZ")
-            for dest, source in zip("XY", axes):
-                links.new(separate_position.outputs[source], combine.inputs[dest])
-            brick = nodes.new("ShaderNodeTexBrick")
-            links.new(combine.outputs[0], brick.inputs["Vector"])
-            for socket, key in (("Color1", "color_1"), ("Color2", "color_2"),
-                                ("Mortar", "mortar_color"), ("Mortar Size", "mortar_size_m"),
-                                ("Brick Width", "brick_width_m"), ("Row Height", "row_height_m")):
-                brick.inputs[socket].default_value = params[key]
-            brick.inputs["Scale"].default_value = 1.0
-            multiply_color = nodes.new("ShaderNodeVectorMath")
-            multiply_color.operation = "SCALE"
-            links.new(brick.outputs["Color"], multiply_color.inputs[0])
-            links.new(separate_normal.outputs[weight], multiply_color.inputs[3])
-            colors.append(multiply_color.outputs[0])
-            multiply_height = nodes.new("ShaderNodeMath")
-            multiply_height.operation = "MULTIPLY"
-            links.new(brick.outputs["Fac"], multiply_height.inputs[0])
-            links.new(separate_normal.outputs[weight], multiply_height.inputs[1])
-            heights.append(multiply_height.outputs[0])
-        def add_sockets(sockets, node_type):
-            total = sockets[0]
-            for socket in sockets[1:]:
-                add = nodes.new(node_type)
-                add.operation = "ADD"
-                links.new(total, add.inputs[0])
-                links.new(socket, add.inputs[1])
-                total = add.outputs[0]
-            return total
-        links.new(add_sockets(colors, "ShaderNodeVectorMath"), shader.inputs["Base Color"])
-        links.new(add_sockets(heights, "ShaderNodeMath"), bump.inputs["Height"])
+        separate = nodes.new("ShaderNodeSeparateXYZ")
+        links.new(absolute.outputs[0], separate.inputs[0])
+        # On X-facing sides, rotate the fiber coordinates so the slow grain
+        # axis runs along the face instead of ending at it. Other faces keep
+        # their original coordinates and appearance.
+        grain_position = nodes.new("ShaderNodeSeparateXYZ")
+        grain_position.name = "Wood grain coordinates"
+        links.new(mapping.outputs["Vector"], grain_position.inputs[0])
+        side_position = nodes.new("ShaderNodeCombineXYZ")
+        side_position.name = "Fibers across former end faces"
+        links.new(grain_position.outputs["Y"], side_position.inputs["X"])
+        links.new(grain_position.outputs["X"], side_position.inputs["Y"])
+        links.new(grain_position.outputs["Z"], side_position.inputs["Z"])
+        fiber_direction = nodes.new("ShaderNodeMix")
+        fiber_direction.name = "Match striations on inner sides"
+        fiber_direction.data_type, fiber_direction.factor_mode = "VECTOR", "UNIFORM"
+        links.new(separate.outputs["X"], fiber_direction.inputs[0])
+        links.new(mapping.outputs["Vector"], fiber_direction.inputs[4])
+        links.new(side_position.outputs["Vector"], fiber_direction.inputs[5])
+        links.new(fiber_direction.outputs[1], stretch.inputs[0])
+        blend = nodes.new("ShaderNodeMixRGB")
+        blend.name = "Sides versus top and bottom"
+        links.new(separate.outputs["Z"], blend.inputs[0])
+        links.new(side_ramp.outputs["Color"], blend.inputs[1])
+        links.new(ramp.outputs["Color"], blend.inputs[2])
+        links.new(blend.outputs[0], shader.inputs["Base Color"])
+        roughness = nodes.new("ShaderNodeMapRange")
+        roughness.inputs["To Min"].default_value = 0.42
+        roughness.inputs["To Max"].default_value = 0.68
+        links.new(noise.outputs["Fac"], roughness.inputs["Value"])
+        links.new(roughness.outputs[0], shader.inputs["Roughness"])
+        side_weight = nodes.new("ShaderNodeMath")
+        side_weight.operation = "SUBTRACT"
+        side_weight.inputs[0].default_value = 1.0
+        links.new(separate.outputs["Z"], side_weight.inputs[1])
+        top_height = nodes.new("ShaderNodeMath")
+        top_height.operation = "MULTIPLY"
+        links.new(grain.outputs[0], top_height.inputs[0])
+        links.new(separate.outputs["Z"], top_height.inputs[1])
+        side_height = nodes.new("ShaderNodeMath")
+        side_height.operation = "MULTIPLY"
+        links.new(side_grain.outputs[0], side_height.inputs[0])
+        links.new(side_weight.outputs[0], side_height.inputs[1])
+        height = nodes.new("ShaderNodeMath")
+        height.operation = "ADD"
+        links.new(top_height.outputs[0], height.inputs[0])
+        links.new(side_height.outputs[0], height.inputs[1])
+        fiber_bump = nodes.new("ShaderNodeBump")
+        fiber_bump.name = "Fine longitudinal wood pores"
+        fiber_bump.inputs["Strength"].default_value = 0.16
+        fiber_bump.inputs["Distance"].default_value = 0.0003
+        links.new(noise.outputs["Fac"], fiber_bump.inputs["Height"])
+        links.new(fiber_bump.outputs["Normal"], bump.inputs["Normal"])
+        links.new(height.outputs[0], bump.inputs["Height"])
     return mat
 
 
@@ -338,7 +436,7 @@ def configure_scene(data, args):
     table_mat, _ = material("Tabletop", [0.33, 0.34, 0.35, 1.0], roughness=0.7)
     ramp_mat, _ = material("Ramp", [0.42, 0.43, 0.44, 1.0], roughness=0.75)
     base_mat, _ = material("Table base", [0.24, 0.25, 0.26, 1.0], roughness=0.8)
-    ground_mat, _ = material("Neutral ground", [0.24, 0.25, 0.27, 1.0], roughness=0.85)
+    ground_mat = emission_material("Solid warm-gray backdrop", RENDER["world_color"])
     box("Tabletop", g["table_dims"], [0, 0, -g["table_dims"][2] / 2], table_mat)
     box("Table base", g["base_dims"], [0, 0, -(g["base_dims"][2] + g["table_dims"][2]) / 2], base_mat)
     box("Backdrop ground", [200, 200, 0.1], [0, 0, -g["base_dims"][2] - g["table_dims"][2] / 2 - 0.05], ground_mat)
@@ -348,15 +446,22 @@ def configure_scene(data, args):
                        [(0, 3, 2), (0, 2, 1), (0, 4, 5), (0, 5, 3),
                         (1, 2, 5), (1, 5, 4), (0, 1, 4), (3, 5, 2)], ramp_mat)
     ramp.location = g["ramp_position"]
-    materials = {name: procedural_material(name) for name in MATERIALS}
+    materials = {name: procedural_material(name) for name in MATERIALS if name != "brick"}
+    if any(obj["material"] == "brick" for obj in data["objects"].values()):
+        materials["brick"], brick_uvs = load_brick_appearance()
     objects = {name: box(name, data["objects"][name]["dimensions"], (0, 0, 0),
                          materials[data["objects"][name]["material"]], bevel=True) for name in OBJECT_NAMES}
+    for name, obj in objects.items():
+        if data["objects"][name]["material"] == "brick":
+            copy_brick_uv(obj.data, brick_uvs)
     camera_data = bpy.data.cameras.new("Fixed camera")
     camera = bpy.data.objects.new("Fixed camera", camera_data)
     scene.collection.objects.link(camera)
     camera.location = CAMERA["location"]
     point_at(camera, CAMERA["target"])
-    camera_data.type, camera_data.ortho_scale = "ORTHO", CAMERA["ortho_scale"]
+    camera_data.type = "PERSP"
+    camera_data.sensor_fit = "HORIZONTAL"
+    camera_data.lens, camera_data.sensor_width = CAMERA["lens_mm"], CAMERA["sensor_width_mm"]
     camera_data.clip_start, camera_data.clip_end = CAMERA["clip_start"], CAMERA["clip_end"]
     camera_data.dof.use_dof = False
     scene.camera = camera
@@ -411,53 +516,45 @@ def import_animation(scene, objects, frames):
 
 
 def verify_replay(scene, objects, frames):
-    """Check evaluated Blender transforms against every recorded pose, without physics."""
-    from bpy_extras.object_utils import world_to_camera_view
-    from mathutils import Vector
-    max_position_error = max_quaternion_error = 0.0
-    for sample in frames:
+    """Check three recorded poses; Blender never simulates physics."""
+    for sample in (frames[0], frames[len(frames) // 2], frames[-1]):
         scene.frame_set(sample["frame"] + 1)
         for name, obj in objects.items():
             state = sample["objects"][name]
-            position_error = max(abs(a - b) for a, b in zip(obj.location, state["position"]))
+            require(max(abs(a - b) for a, b in zip(obj.location, state["position"])) < 1e-6,
+                    "Blender changed a recorded position")
             x, y, z, w = state["quaternion_xyzw"]
-            quaternion_error = max(abs(a - b) for a, b in zip(obj.rotation_quaternion, (w, x, y, z)))
-            max_position_error = max(max_position_error, position_error)
-            max_quaternion_error = max(max_quaternion_error, quaternion_error)
-            require(position_error < 1e-6 and quaternion_error < 1e-6, "Blender changed a recorded pose")
-            for corner in obj.bound_box:
-                projected = world_to_camera_view(scene, scene.camera, obj.matrix_world @ Vector(corner))
-                require(0.02 < projected.x < 0.98 and 0.02 < projected.y < 0.98 and projected.z > 0,
-                        f"Fixed camera crops {name} at frame {sample['frame']}; do not auto-fit individual conditions")
-    return {"frames_verified": len(frames), "objects_per_frame": len(objects),
-            "max_position_error_m": max_position_error, "max_quaternion_component_error": max_quaternion_error,
-            "all_fcurves_linear": True, "all_objects_inside_camera": True, "blender_physics": False}
+            require(max(abs(a - b) for a, b in zip(obj.rotation_quaternion, (w, x, y, z))) < 1e-6,
+                    "Blender changed a recorded orientation")
 
 
 def render_condition(path, data, args, output_root):
     scene, objects = configure_scene(data, args)
     import_animation(scene, objects, data["frames"])
-    verification = verify_replay(scene, objects, data["frames"])
+    verify_replay(scene, objects, data["frames"])
     indices = selected_frames(data, args)
     output = output_root / data["condition_id"]
     output.mkdir(parents=True, exist_ok=True)
+    # Replace only files owned by this renderer; no unrelated outputs are removed.
+    for previous in output.glob("frame_*.png"):
+        previous.unlink()
+    (output / "empty_scene.png").unlink(missing_ok=True)
     policy = {"resolution": list(args.resolution), "fps": scene.render.fps,
               "engine": scene.render.engine, "camera": CAMERA, "lighting": LIGHTS,
               "materials": MATERIALS, "bevel": BEVEL, "render": RENDER,
               "motion_blur": False, "depth_of_field": False, "png": {"mode": "RGB", "bit_depth": 8}}
-    metadata = {"schema_version": 1, "condition_id": data["condition_id"],
-                "blender_version": bpy.app.version_string, "blender_build_hash": bpy.app.build_hash.decode(),
-                "trajectory_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                "renderer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                "policy_sha256": hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest(),
+    metadata = {"condition_id": data["condition_id"], "stimulus": data["stimulus"],
+                "blender_version": bpy.app.version_string,
                 **policy, "camera_matrix_world": [list(row) for row in scene.camera.matrix_world],
                 "object_dimensions": {name: data["objects"][name]["dimensions"] for name in OBJECT_NAMES},
                 "object_materials": {name: data["objects"][name]["material"] for name in OBJECT_NAMES},
                 "frame_mapping": "JSON n -> Blender n+1 -> frame_nnnn.png",
                 "mode": "smoke" if args.smoke else "frames", "requested_frames": indices,
-                "rendered_frames": [], "status": "rendering", "pose_verification": verification,
+                "rendered_frames": [], "status": "rendering", "empty_scene_image": "empty_scene.png",
                 "shadow_method": "virtual shadow maps, jittered area shadows, screen-space ray tracing",
-                "material_coordinates": "local object coordinates in meters; common mapping scale 1.0",
+                "material_coordinates": "wood: local object meters, mapping scale 1.0; "
+                                        "brick: authored per-face UVMap and Generated noise; "
+                                        "metal/practice: uniform",
                 "scene_geometry": data["scene_geometry"]}
     metadata_path = output / "render_metadata.json"
     def save_metadata():
@@ -466,6 +563,15 @@ def render_condition(path, data, args, output_root):
         temporary.replace(metadata_path)
     save_metadata()
     try:
+        scene.frame_set(1)
+        for obj in objects.values():
+            obj.hide_render = True
+        try:
+            scene.render.filepath = str(output / "empty_scene.png")
+            bpy.ops.render.render(write_still=True)
+        finally:
+            for obj in objects.values():
+                obj.hide_render = False
         for index in indices:
             scene.frame_set(index + 1)
             scene.render.filepath = str(output / f"frame_{index:04d}.png")

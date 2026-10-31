@@ -72,9 +72,6 @@ Condition: $(@bind selected_trajectory_path Select(trajectory_options))
 # ╔═╡ 86768a75-803c-41a4-865a-ad250519077e
 begin
     trajectory = JSON.parsefile(selected_trajectory_path)
-    get(trajectory, "schema_version", nothing) == 1 ||
-        error("Unsupported trajectory schema version in $selected_trajectory_path")
-
     frames = trajectory["frames"]
     frame_count = length(frames)
     frame_count == trajectory["timing"]["frame_count"] ||

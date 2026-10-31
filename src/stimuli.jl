@@ -3,9 +3,10 @@ const DEFAULT_STIMULI_CONFIG = normpath(joinpath(@__DIR__, "..", "stimuli", "con
 """
     StimulusSpec(; condition_id, ramp_material, table_material, mass_ratio,
                  appearance_mass_ratio, congruent, obj_ramp_dims, obj_table_dims,
-                 obj_frictions, restitution, obj_positions, slope,
+                 obj_frictions, surface_frictions, ramp_clearance, restitution,
+                 obj_positions, slope,
                  table_ramp_intersection, physics_hz, video_fps, max_duration,
-                 post_collision_duration, seed, enabled=true)
+                 action_duration, seed, enabled=true)
 
 Validated, immutable configuration for one human-experiment stimulus.
 `mass_ratio` is the physical ramp-object mass divided by the table-object mass,
@@ -14,6 +15,8 @@ predicted by the visible materials, independently of the simulated masses.
 Dimensions are full box dimensions in meters, durations are seconds, and slope
 is rise/run. `obj_positions` uses the existing `ramp` placement parameters
 (ramp first, table second), not world-space coordinates. Frequencies are integer Hz.
+`surface_frictions` is ramp/table lateral friction; `ramp_clearance` is a
+normal offset in meters beyond half the ramp object height.
 Materials describe appearance; this configuration layer does not apply textures.
 `enabled` controls inclusion in batch exports; loading still validates all conditions.
 """
@@ -27,6 +30,8 @@ struct StimulusSpec
     obj_ramp_dims::NTuple{3,Float64}
     obj_table_dims::NTuple{3,Float64}
     obj_frictions::NTuple{2,Float64}
+    surface_frictions::NTuple{2,Float64}
+    ramp_clearance::Float64
     restitution::Float64
     obj_positions::NTuple{2,Float64}
     slope::Float64
@@ -34,7 +39,7 @@ struct StimulusSpec
     physics_hz::Int
     video_fps::Int
     max_duration::Float64
-    post_collision_duration::Float64
+    action_duration::Float64
     seed::Int
     enabled::Bool
 
@@ -42,10 +47,11 @@ struct StimulusSpec
                           ramp_material::AbstractString, table_material::AbstractString,
                           mass_ratio::Real, appearance_mass_ratio::Real, congruent::Bool,
                           obj_ramp_dims, obj_table_dims, obj_frictions,
+                          surface_frictions, ramp_clearance::Real,
                           restitution::Real, obj_positions, slope::Real,
                           table_ramp_intersection::Real, physics_hz::Integer,
                           video_fps::Integer, max_duration::Real,
-                          post_collision_duration::Real, seed::Integer, enabled::Bool=true)
+                          action_duration::Real, seed::Integer, enabled::Bool=true)
         isempty(strip(condition_id)) && throw(ArgumentError("condition_id must not be empty"))
         for material in (ramp_material, table_material)
             isempty(strip(material)) && throw(ArgumentError("material must not be empty"))
@@ -53,16 +59,23 @@ struct StimulusSpec
         mass_ratio = Float64(mass_ratio)
         appearance_mass_ratio = Float64(appearance_mass_ratio)
         max_duration = Float64(max_duration)
-        post_collision_duration = Float64(post_collision_duration)
+        action_duration = Float64(action_duration)
         for (name, value) in (("mass_ratio", mass_ratio),
                               ("appearance_mass_ratio", appearance_mass_ratio),
                               ("physics_hz", physics_hz), ("video_fps", video_fps),
                               ("max_duration", max_duration),
-                              ("post_collision_duration", post_collision_duration))
+                              ("action_duration", action_duration))
             _positive_finite(value, name)
         end
         physics_hz % video_fps == 0 ||
             throw(ArgumentError("physics_hz must be divisible by video_fps"))
+        action_duration <= max_duration || throw(ArgumentError("action_duration exceeds max_duration"))
+        isinteger(action_duration * video_fps) && action_duration * video_fps >= 2 ||
+            throw(ArgumentError("action_duration must contain a whole number of video frames (at least two)"))
+        length(surface_frictions) == 2 || throw(ArgumentError("surface_frictions must contain two values"))
+        surfaces = (Float64(surface_frictions[1]), Float64(surface_frictions[2]))
+        all(x -> isfinite(x) && x >= 0, surfaces) || throw(ArgumentError("invalid surface friction"))
+        isfinite(ramp_clearance) && ramp_clearance >= 0 || throw(ArgumentError("invalid ramp clearance"))
         ramp_dims = _object_dimensions(obj_ramp_dims, "obj_ramp_dims")
         table_dims = _object_dimensions(obj_table_dims, "obj_table_dims")
         length(obj_frictions) == 2 || throw(ArgumentError("obj_frictions must contain two values"))
@@ -83,8 +96,8 @@ struct StimulusSpec
             throw(ArgumentError("congruence must agree with physical and appearance mass ratios"))
         return new(String(condition_id), String(ramp_material), String(table_material),
                    mass_ratio, appearance_mass_ratio, congruent, ramp_dims, table_dims,
-                   frictions, Float64(restitution), positions, slope, table_ramp_intersection,
-                   Int(physics_hz), Int(video_fps), max_duration, post_collision_duration, Int(seed), enabled)
+                   frictions, surfaces, Float64(ramp_clearance), Float64(restitution), positions, slope, table_ramp_intersection,
+                   Int(physics_hz), Int(video_fps), max_duration, action_duration, Int(seed), enabled)
     end
 end
 
@@ -132,6 +145,7 @@ responsibility; this function does not apply those settings or mutate global RNG
 """
 function stimulus_scene_kwargs(spec::StimulusSpec)
     return (; mass_ratio=spec.mass_ratio, obj_frictions=spec.obj_frictions,
+            surface_frictions=spec.surface_frictions, ramp_clearance=spec.ramp_clearance,
             obj_positions=spec.obj_positions, slope=spec.slope,
             tableRampIntersection=spec.table_ramp_intersection,
             restitution=spec.restitution, obj_ramp_dims=spec.obj_ramp_dims,

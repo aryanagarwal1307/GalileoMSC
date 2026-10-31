@@ -4,10 +4,8 @@ using GalileoMSC
 using PhyBullet: pb
 using PyCall: pyimport
 using JSON
-using SHA
 
 const DEFAULT_TRAJECTORY_DIR = normpath(joinpath(@__DIR__, "..", "stimuli", "generated", "trajectories"))
-const RAMP_ASSET_PATH = normpath(joinpath(@__DIR__, "..", "assets", "ramp.obj"))
 
 # MODEL-CLOCK ALIGNMENT IS REQUIRED BEFORE FITTING HUMAN DATA.
 # This exporter deliberately bypasses PhySMC.step: its inclusive dt <= step_dur
@@ -41,9 +39,8 @@ initial conditions are explicit; the configured seed is retained for provenance.
 """
 function simulate_stimulus_trajectory(spec::StimulusSpec)
     substeps_per_frame = spec.physics_hz ÷ spec.video_fps
-    max_frame = floor(Int, spec.max_duration * spec.video_fps)
-    max_frame >= 1 || throw(ArgumentError("$(spec.condition_id): max_duration must allow a full video frame"))
-    post_collision_substeps = ceil(Int, spec.post_collision_duration * spec.physics_hz)
+    max_frame = round(Int, spec.action_duration * spec.video_fps) - 1
+    max_frame >= 1 || throw(ArgumentError("$(spec.condition_id): action_duration must allow a full video frame"))
     scene = create_ramp_simulation(; stimulus_scene_kwargs(spec)..., connect_mode=pb.DIRECT)
     try
         pb.setRealTimeSimulation(0; physicsClientId=scene.client)
@@ -56,7 +53,7 @@ function simulate_stimulus_trajectory(spec::StimulusSpec)
         frames = [trajectory_frame(scene, spec, 0, 0)]
         substep = 0
         first_contact_substep = nothing
-        stop_reason = "maximum_duration"
+        stop_reason = "fixed_action_duration"
         for frame in 1:max_frame
             for _ in 1:substeps_per_frame
                 pb.stepSimulation(; physicsClientId=scene.client)
@@ -68,11 +65,6 @@ function simulate_stimulus_trajectory(spec::StimulusSpec)
                 end
             end
             push!(frames, trajectory_frame(scene, spec, frame, substep))
-            if first_contact_substep !== nothing &&
-               substep >= first_contact_substep + post_collision_substeps
-                stop_reason = "post_collision_duration"
-                break
-            end
         end
         first_contact_substep === nothing && error(
             "$(spec.condition_id): no collision between dynamic objects within " *
@@ -80,9 +72,11 @@ function simulate_stimulus_trajectory(spec::StimulusSpec)
 
         first_contact_time = first_contact_substep / spec.physics_hz
         collision_frame = cld(first_contact_substep, substeps_per_frame)
-        completed_post_duration = stop_reason == "post_collision_duration"
+        for offset_ms in (-1000, -200, 200, 1000)
+            probe_frame = floor(Int, (first_contact_substep // spec.physics_hz + offset_ms // 1000) * spec.video_fps + 1 // 2)
+            0 <= probe_frame <= max_frame || error("$(spec.condition_id): probe at $(offset_ms)ms from contact is outside the action; adjust scene placement/friction")
+        end
         return (;
-            schema_version=1,
             condition_id=spec.condition_id,
             stimulus=resolved_fields(spec),
             objects=(;
@@ -111,9 +105,9 @@ function simulate_stimulus_trajectory(spec::StimulusSpec)
                       duration_seconds=last(frames).time_seconds,
                       requested_max_duration_seconds=spec.max_duration,
                       maximum_output_frame=max_frame,
-                      stop_reason, post_collision_duration_completed=completed_post_duration,
+                      stop_reason, action_duration_seconds=spec.action_duration,
                       recorded_post_collision_seconds=(substep - first_contact_substep) / spec.physics_hz,
-                      stop_policy="first full video frame at/after the post-contact interval, capped at floor(max_duration * video_fps); frame count includes frame zero"),
+                      stop_policy="fixed action frame count; frame zero precedes physics; last sample is one frame interval before display duration"),
             collision=(; body_a="ramp_object", body_b="table_object",
                          first_contact_substep, first_contact_time_seconds=first_contact_time,
                          video_frame=collision_frame,
@@ -123,7 +117,6 @@ function simulate_stimulus_trajectory(spec::StimulusSpec)
                           pybullet_package_version=pyimport("importlib.metadata").version("pybullet"),
                           julia_version=string(VERSION), platform=string(Sys.KERNEL), architecture=string(Sys.ARCH),
                           ramp_asset=(; path="assets/ramp.obj",
-                                       sha256=bytes2hex(SHA.sha256(read(RAMP_ASSET_PATH))),
                                        geometry="closed triangular prism with outward-facing normals"),
                           engine_parameters, deterministic_overlapping_pairs=true,
                           seed=spec.seed, randomness="none; fully specified initial conditions",

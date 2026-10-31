@@ -26,3 +26,7 @@ docs/build/
 .idea/
 
 Manifest.toml
+
+# Local web prototype dependencies and build output
+node_modules/
+dist/
