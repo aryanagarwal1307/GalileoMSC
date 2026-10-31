@@ -1,127 +1,141 @@
-# Build all eight stimulus videos
+# Stimulus generation
 
-From the repository root:
+Run from the repository root:
 
 ```sh
+source py-env/bin/activate
+python stimuli/build_stimuli.py --all --dry-run
 python stimuli/build_stimuli.py --all
 ```
 
-On this Mac, activate the existing environment first (`source py-env/bin/activate`)
-to make `python` available. Python 3.8+ works; versions below 3.11 need `tomli`.
-The script checks Python dependencies, the Julia project and its actual PyCall
-Python/PyBullet installation, Blender 4.2+, FFmpeg/libx264 and FFprobe before
-simulation or rendering. Blender was previously tested at 5.2.2 LTS. Override its
-executable with `--blender /Applications/Blender.app/Contents/MacOS/Blender` if needed.
+The controller validates configuration, exports PyBullet trajectories, renders
+Blender PNGs, and encodes H.264 MP4s with four exact probe stills per condition.
+It builds every enabled condition in `config/stimuli.toml`: **12 conditions**,
+covering six directed distinct-material pairs, each congruent and incongruent.
+No model generation or inference runs are involved. Every selected condition is
+rebuilt; there is no hash cache, checkpoint schema, pilot, or parameter sweep.
 
-The command generates and validates trajectories, renders and validates every
-PNG, then encodes and probes every complete MP4. It reuses the existing Julia
-exporter, Blender trajectory validator/renderer, and FFmpeg encoder; Blender never
-simulates physics. Logs identify the build stage and condition. Any failure stops
-the build with a nonzero exit code.
+Generate the separate practice scene without rebuilding the 12 conditions:
 
-Final deliverables are exactly:
+```sh
+python stimuli/build_stimuli.py --practice
+```
+
+`[practice]` in the same config inherits every physics/timing default. Both
+blocks use one shared solid-gray material and each has mass 1 kg.
+The camera, lighting, geometry, friction, render and encode settings are the
+same as the main stimuli. Its video is `generated/videos/practice_equal_mass.mp4`;
+its four probes are recorded under `practice` in the existing video manifest.
+Practice and main builds preserve each other's manifest entries. `--all`
+continues to generate only the 12 main conditions. The experiment automatically
+uses the practice video once generation finishes. `--practice --preview` makes
+only the practice still preview.
+
+Python 3.11+ uses standard-library TOML; Python 3.8–3.10 needs `tomli`. Julia
+uses this repository's project and its configured PyCall/PyBullet installation.
+Blender 4.2+, FFmpeg/libx264 and FFprobe must be installed. The controller finds
+Blender on PATH or at `/Applications/Blender.app/Contents/MacOS/Blender`; use
+`--blender PATH` to override it. A build lock prevents concurrent controller runs.
+
+## Parameters
+
+Physics and condition settings have one source: **`config/stimuli.toml`**.
+Render and video intro settings live at the top of **`build_stimuli.py`**.
+Camera, lighting and appearance live in **`blender/render_stimuli.py`**.
+
+| Parameter | Setting |
+|---|---|
+| Appearance masses, wood:brick:metal | 1:2:8 |
+| Simulated masses | Table = 1; ramp = configured ramp/table ratio |
+| Physics / video | 240 Hz / 60 fps; four physics ticks per action frame |
+| Physics timestep | 4.166667 ms |
+| Action display duration | 4.5 s, 270 frames |
+| Intro | 800 ms empty scene + 200 ms stationary objects |
+| Complete MP4 | 5.5 s, 330 frames; no final hold |
+| Both boxes, full dimensions | 0.24 × 0.24 × 0.12 m |
+| Placement parameters, ramp/table | 0.5 / 1.45 |
+| Ramp normal clearance | 0.001 m |
+| Object lateral friction, both | 0.3 |
+| Ramp / table lateral friction | 2.0 / 0.08333333333333333 |
+| Effective object/surface friction | 0.6 ramp / 0.025 table |
+| Restitution, each body | 0.5; Bullet combines contact values |
+| Gravity / slope | −10 m/s² / 2/3 rise/run |
+| Solver iterations | 50, fixed; no sweep or internal substeps |
+| Render / encode | 1920×1080, Eevee 64 samples; H.264 CRF 15, slow, yuv420p, faststart |
+
+The ramp object's center is offset along the ramp normal, correcting the old
+initial penetration. The placement leaves room for the
+1000 ms baseline probe; the low tabletop friction retains post-contact motion.
+Timing adjustment: `action_duration` changes from **5.0 to 4.5 s** and
+`obj_positions` from **[0.25, 1.5] to [0.5, 1.45]**. The ramp block moves
+0.5 m downhill in world X (1/3 m lower); the table block moves 0.125 m
+toward the ramp. Targeted DIRECT simulations at ratios 0.125, 0.5, 1, and 8
+found first contact at **3.275 s**, leaving the +1000 ms probe at **4.275 s**.
+Moving only the ramp block left that probe too late for the shorter clip.
+The physics timestep, solver, friction, restitution and FPS are unchanged.
+
+Appearance changes only the renderer's material, not friction or geometry.
+Violations use the reciprocal of the appearance-predicted mass ratio.
+
+The 270 action samples cover times 0 through 269/60 s. The final sample is
+shown for one frame interval, making exactly 4.5 seconds of action display.
+`max_duration=10` is a configuration ceiling for `action_duration`, not an
+extra simulation phase. The seed is 42; these scenes make no random draws.
+
+## Probes and outputs
+
+Contact is detected between the two objects after every physics tick. For each
+probe offset `d` in seconds (−1.000, −0.200, +0.200, +1.000), its zero-based MP4 frame is:
 
 ```text
-stimuli/generated/videos/<condition_id>.mp4    # eight files
-stimuli/generated/videos/video_manifest.json
+60 + floor((first_contact_time_seconds + d) * 60 + 0.5)
 ```
 
-Intermediate JSONs remain in `stimuli/generated/trajectories/`, and PNGs in
-`results/stimuli/final/pngs/`. Checkpoints and the derived configuration live in
-`stimuli/generated/build/`. All generated outputs are ignored by Git.
+Rounding uses exact contact time and ties go to the later frame. The 60-frame
+intro is added afterwards. Frame quantization contributes at most 8.333 ms;
+contact detection has 4.167 ms resolution. The probe key `collision`
+means **200 ms after** contact. Out-of-range probes or absent collisions stop
+that condition with a short error rather than silently choosing another frame.
 
-## Edit parameters in one place
+| Output | Contents |
+|---|---|
+| `stimuli/generated/trajectories/<id>.json` | 270 poses, geometry, parameters, contact time, software/engine settings |
+| `results/stimuli/final/pngs/<id>/` | 270 action PNGs, `empty_scene.png`, render metadata |
+| `stimuli/generated/videos/<id>.mp4` | Complete 5.5-second video |
+| `stimuli/generated/videos/<id>_<probe>.png` | Four stills decoded from the exact MP4 probe frames |
+| `stimuli/generated/videos/video_manifest.json` | Video dimensions/FPS/count/duration and per-condition probe frames/still paths |
 
-Edit the clearly marked `SIMULATION`, `RENDERING` and `ENCODING` dictionaries at
-the top of **[build_stimuli.py](build_stimuli.py)**:
+The encoder checks frame availability, video format, FPS, count and duration.
+Blender replays recorded poses without physics and checks three transforms.
+There are no corner/camera bounds scans, full playback reviews, diagnostic
+reports, or software/source fingerprints. The manifest updates after each video;
+`complete_condition_set` is true once all enabled conditions have been built.
 
-| Parameter | Default | Meaning |
-|---|---:|---|
-| `physics_hz` | 240 | Physics timestep is `1 / physics_hz` seconds |
-| `video_fps` | 60 | Must divide `physics_hz`; four physics substeps per frame |
-| `post_collision_duration` | 2.0 s | Simulation continues this long after first contact |
-| `max_duration` | 10.0 s | Simulation safety limit, excluding display holds |
-| `hold_start_seconds` | 0.5 s | Extra display time at the first frame |
-| `hold_end_seconds` | 0.5 s | Extra display time at the last frame |
-| `resolution` | 960×540 | Common even output dimensions |
-| `samples` | 64 | Common Blender render sample count |
-| `crf`, `preset` | 15, slow | Common H.264 encoding settings |
-
-Dimensions, friction, restitution, positions, slope and seed are also exposed
-there. Condition IDs, materials and mass ratios remain in
-`config/stimuli.toml`. The master overrides its listed simulation fields for every
-condition in a derived TOML file passed to the exporter. It does not rewrite the
-source config or change defaults used by standalone analyses. FPS flows from
-that configuration into trajectories, Blender and FFmpeg without resampling.
-The renderer owns the shared camera, lights, materials and bevels; its source is
-fingerprinted so edits there invalidate renders.
-
-Increase `post_collision_duration` to extend simulated motion after contact;
-increase `max_duration` if its safety cap would otherwise intervene. All eight
-trajectories must share the same first pose, frame indices, FPS and duration.
-If new physics settings produce unequal lengths, the build fails before rendering;
-it does not trim or pad individual motion sequences to hide the mismatch.
-
-## Endpoint holds and jsPsych
-
-FFmpeg adds holds by cloning the first and last images. Set either hold to `0`
-to disable it. Holds must be exact whole-frame intervals: 0.5 s at 60 fps adds
-30 frames at each end. Every original trajectory frame is retained in order.
-Holds do not change PyBullet timing or require extra Blender frames.
-
-For the current 200-frame trajectories, the defaults produce **260-frame,
-4.333333-second** videos at 60 fps: `(200 + 30 + 30) / 60`. Without holds, the
-duration is `200 / 60 = 3.333333` seconds. The final source frame already has its
-normal one-frame display interval; the configured hold is additional time.
-
-There are no trial-specific cuts or short copies. **jsPsych applies stopping
-frames during playback**, using the full video for every observation condition.
-The manifest records `trajectory_frame_count`, `hold_start_frames`,
-`hold_end_frames` and `trajectory_frame_offset`. A zero-based trajectory frame
-`n` occurs at video frame `n + hold_start_frames`, or time
-`(n + hold_start_frames) / fps`. The initial hold occupies the preceding frames.
-Model-clock alignment for fitting human data remains separate from this pipeline.
-
-## Resume, force and checks
+## Small checks and individual stages
 
 ```sh
-python stimuli/build_stimuli.py --all --dry-run  # Check dependencies and print the plan
-python stimuli/build_stimuli.py --all            # Resume/rebuild only stale work
-python stimuli/build_stimuli.py --all --force    # Explicitly rebuild everything
-```
+# One trajectory and four stills (empty, initial, contact, final); no production MP4/manifest.
+python stimuli/build_stimuli.py --condition wood_to_metal_violation --preview
 
-Resume uses content hashes, resolved settings, implementation hashes and software
-versions, not file existence or timestamps. A completed trajectory stage can be
-reused; renders and videos are checkpointed per condition. Missing frames,
-incomplete metadata, bad PNG checksums or changed output hashes trigger rebuilding
-the affected work. Every final video is freshly checked with FFprobe even on a
-fully cached build. A CRF/hold change re-encodes videos; a render-setting change
-rebuilds renders and dependent videos; simulation/configuration changes rerun the
-trajectory stage and rebuild dependent outputs as needed. `--force` bypasses all
-reuse. Changing code or relevant tool versions also invalidates affected stages.
+# One full video. This replaces the manifest with this build's selected set.
+python stimuli/build_stimuli.py --condition brick_to_metal_congruent
 
-Existing outputs from before this orchestrator have no build checkpoint proving
-which exporter inputs produced them. **The first tracked build conservatively
-regenerates those outputs once**; subsequent builds resume normally. Keep
-`stimuli/generated/build/state.json` to retain that provenance.
-
-Stages publish validated temporary outputs, preserving the previous version if
-generation/validation fails. Unexpected unrelated files in managed output folders
-cause an error rather than being deleted. Stale `.build.lock`/`.encode.lock` files
-must only be removed after confirming the recorded process has stopped. Do not
-run the standalone exporter/renderer concurrently with the master build.
-
-The combined manifest contains all eight video records, complete source render
-metadata, source PNG/video hashes, resolved build settings, software versions,
-stage fingerprints and the trajectory-to-video mapping. The terminal summary
-lists all eight paths, frame counts, durations and file sizes.
-
-Cheap regression tests (tiny synthetic four-frame inputs; Julia and Blender are
-stubbed, FFmpeg/FFprobe are real):
-
-```sh
+# Cheap synthetic encoding/timing and manifest checks; no physics/model/Blender.
 python test/test_stimuli_build.py
+
+# Two short physics checks (main/practice); no saved trajectories or rendering.
+julia --startup-file=no --compiled-modules=existing --project=. scripts/check_stimulus_timing.jl
 ```
 
-These test the orchestration, hold contents, resume, force, incomplete-output
-recovery and failure handling without running the full experimental build.
+Preview outputs go to `results/stimuli/preview/{trajectories,pngs}/`.
+A one-condition production build advertises only that fresh condition; run
+`--all` before building the experiment. Existing unselected files remain on disk.
+Interrupted builds can be restarted, but selected conditions are rebuilt from
+scratch. Only remove a stale `stimuli/generated/build.lock` after verifying that
+its process is no longer running. Do not run standalone stages concurrently.
+
+Standalone stage instructions: [renderer](blender/README.md),
+[encoder](video/README.md). **Inference/PhySMC clock repair remains separate**;
+this pipeline directly steps PyBullet and does not change the model clock.
+The experiment uses all six congruent pairs for baseline and assigned-timing phases;
+during/post also show one quota-assigned incongruent pair.

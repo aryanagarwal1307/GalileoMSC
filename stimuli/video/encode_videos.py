@@ -1,26 +1,15 @@
-"""Encode complete Blender PNG sequences; validate inputs and probe every MP4.
-
-Python standard library only. Requires FFmpeg (libx264) and FFprobe on PATH.
-No experimental stopping frame or collision time is used to trim a video.
-"""
-
+"""Encode action PNGs plus the empty-scene/object intro, and save exact probe stills."""
 import argparse
 from fractions import Fraction
-import hashlib
 import json
-import math
-import os
 from pathlib import Path
-import re
-import shlex
 import shutil
 import struct
 import subprocess
-import sys
 import tempfile
-import zlib
 
 ROOT = Path(__file__).resolve().parents[2]
+PROBE_OFFSETS_MS = {"baseline": -1000, "preCollision": -200, "collision": 200, "postCollision": 1000}
 
 
 def require(ok, message):
@@ -29,331 +18,180 @@ def require(ok, message):
 
 
 def read_json(path):
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text())
 
 
-def sha256(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def discover(directory):
-    """IDs come from generated trajectory metadata, never a filename/name list."""
-    found, seen = {}, set()
-    for path in sorted(directory.glob("*.json")):
-        data = read_json(path)
-        condition = data["condition_id"]
-        require(isinstance(condition, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", condition),
-                f"{path}: unsafe condition ID")
-        require(condition not in seen, f"Duplicate trajectory condition: {condition}")
-        seen.add(condition)
-        require(data["schema_version"] == 1 and data["stimulus"]["condition_id"] == condition,
-                f"{path}: inconsistent trajectory metadata")
-        if data["stimulus"].get("enabled", True):
-            found[condition] = (path, data)
-    require(found, f"No enabled trajectory metadata found in {directory}")
-    return found
+def atomic_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(data, indent=2, allow_nan=False) + "\n")
+    temporary.replace(path)
 
 
 def validate_source(condition, trajectory, frames_root):
     path, data = trajectory
     directory = frames_root / condition
-    metadata_path = directory / "render_metadata.json"
-    render = read_json(metadata_path)
-    require(render["schema_version"] == 1 and render["condition_id"] == condition,
-            f"{condition}: render metadata ID/schema mismatch")
-    require(render["status"] == "complete" and render["mode"] == "frames",
-            f"{condition}: render is incomplete or a smoke render")
-    require(render["trajectory_sha256"] == sha256(path), f"{condition}: render uses a different trajectory")
+    render = read_json(directory / "render_metadata.json")
     count = data["timing"]["frame_count"]
-    require(type(count) is int and count > 0 and len(data["frames"]) == count,
-            f"{condition}: invalid trajectory frame count")
-    indices = list(range(count))
-    require([f["frame"] for f in data["frames"]] == indices, f"{condition}: noncontiguous trajectory frames")
-    require(render["requested_frames"] == render["rendered_frames"] == indices,
-            f"{condition}: render must contain the entire trajectory, frame 0 through {count - 1}")
-    fps = Fraction(str(render["fps"]))
-    require(fps > 0 and fps == Fraction(str(data["timing"]["video_fps"])),
-            f"{condition}: invalid/mismatched FPS")
+    require(render["condition_id"] == condition and render["stimulus"] == data["stimulus"],
+            f"{condition}: render/trajectory settings differ; rebuild the render")
+    require(render["status"] == "complete" and render["mode"] == "frames" and
+            render["rendered_frames"] == list(range(count)), f"{condition}: incomplete render")
+    require({p.name for p in directory.glob('frame_*.png')} == {f'frame_{i:04d}.png' for i in range(count)},
+            f"{condition}: missing or extra action PNGs")
     resolution = render["resolution"]
-    require(len(resolution) == 2 and all(type(x) is int and x > 0 and x % 2 == 0 for x in resolution),
-            f"{condition}: yuv420p requires positive even width and height")
-    expected = {f"frame_{i:04d}.png" for i in indices}
-    actual = {p.name for p in directory.glob("*.png")}
-    missing, extra = sorted(expected - actual), sorted(actual - expected)
-    require(not missing and not extra,
-            f"{condition}: PNG sequence mismatch; missing={missing[:5]}, unexpected={extra[:5]}")
-    sequence_hash = hashlib.sha256()
-    for name in sorted(expected):
-        content = (directory / name).read_bytes()
-        header = content[:33]
-        require(len(header) == 33 and header[:8] == b"\x89PNG\r\n\x1a\n"
-                and header[8:16] == b"\x00\x00\x00\x0dIHDR", f"{condition}/{name}: invalid PNG header")
-        require(list(struct.unpack(">II", header[16:24])) == resolution,
-                f"{condition}/{name}: resolution differs from render metadata")
-        offset, ended = 8, False
-        while offset + 12 <= len(content):
-            size = struct.unpack(">I", content[offset:offset + 4])[0]
-            end = offset + 12 + size
-            require(end <= len(content), f"{condition}/{name}: truncated PNG chunk")
-            chunk = content[offset + 4:end - 4]
-            require(zlib.crc32(chunk) == struct.unpack(">I", content[end - 4:end])[0],
-                    f"{condition}/{name}: PNG checksum mismatch")
-            offset = end
-            if chunk[:4] == b"IEND":
-                ended = True
-                break
-        require(ended and offset == len(content), f"{condition}/{name}: incomplete PNG")
-        sequence_hash.update(name.encode())
-        sequence_hash.update(hashlib.sha256(content).digest())
-    return {"condition_id": condition, "directory": directory, "fps": fps,
-            "frame_count": count, "resolution": resolution, "render": render,
-            "metadata_path": metadata_path, "metadata_sha256": sha256(metadata_path),
-            "png_sequence_sha256": sequence_hash.hexdigest()}
+    require(all(type(x) is int and x > 0 and x % 2 == 0 for x in resolution), "Resolution must be positive/even")
+    for name in ("frame_0000.png", f"frame_{count - 1:04d}.png", "empty_scene.png"):
+        with (directory / name).open('rb') as file:
+            header = file.read(24)
+        require(header[:8] == b'\x89PNG\r\n\x1a\n' and list(struct.unpack('>II', header[16:24])) == resolution,
+                f"{condition}/{name}: invalid PNG or resolution")
+    require(render["fps"] == data["timing"]["video_fps"], "Render FPS mismatch")
+    return {"condition_id": condition, "directory": directory, "trajectory": data,
+            "fps": Fraction(str(render["fps"])), "frame_count": count, "resolution": resolution}
 
 
-def matching_sources(sources):
-    formats = {(s["fps"], s["frame_count"], tuple(s["resolution"])) for s in sources}
-    require(len(formats) == 1, "Conditions must have identical FPS, frame count, and resolution; no trimming is allowed")
-
-
-def with_holds(source, start_seconds=0, end_seconds=0):
-    """Add identical endpoint display holds without modifying trajectory samples."""
-    require("trajectory_frame_count" not in source, "Holds have already been applied")
-    holds = []
-    for seconds in (start_seconds, end_seconds):
+def with_intro(source, empty_seconds=0.8, preview_seconds=0.2):
+    counts = []
+    for seconds in (empty_seconds, preview_seconds):
         count = Fraction(str(seconds)) * source["fps"]
-        require(count >= 0 and count.denominator == 1,
-                "Hold durations must be nonnegative whole video-frame intervals")
-        holds.append(int(count))
+        require(count >= 0 and count.denominator == 1, "Intro durations must be nonnegative whole-frame intervals")
+        counts.append(int(count))
+    require('trajectory_frame_count' not in source, "Intro already applied")
     return {**source, "trajectory_frame_count": source["frame_count"],
-            "hold_start_frames": holds[0], "hold_end_frames": holds[1],
-            "frame_count": source["frame_count"] + sum(holds)}
+            "empty_scene_frames": counts[0], "object_preview_frames": counts[1],
+            "trajectory_frame_offset": sum(counts), "frame_count": source["frame_count"] + sum(counts)}
 
 
-def ffmpeg_command(ffmpeg, source, destination, crf=15, overwrite=False, preset="slow"):
-    fps = source["fps"]
-    rate = f"{fps.numerator}/{fps.denominator}"
-    start, end = source.get("hold_start_frames", 0), source.get("hold_end_frames", 0)
-    filters = ["-vf", f"tpad=start_mode=clone:start={start}:stop_mode=clone:stop={end}"] if start or end else []
-    return [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y" if overwrite else "-n",
-            "-threads", "1", "-err_detect", "explode", "-framerate", rate, "-start_number", "0",
-            "-i", str(source["directory"] / "frame_%04d.png"),
-            "-map", "0:v:0", "-an", "-sn", "-dn", "-map_metadata", "-1",
-            "-c:v", "libx264", "-preset", preset, "-crf", str(crf), *filters,
-            "-threads:v", "1", "-filter_threads", "1", "-pix_fmt", "yuv420p",
-            "-r", rate, "-fps_mode", "cfr", "-frames:v", str(source["frame_count"]),
-            "-fflags", "+bitexact", "-flags:v", "+bitexact", "-movflags", "+faststart",
-            "-video_track_timescale", str(fps.numerator * 1000),
-            "-movie_timescale", str(fps.numerator * 1000), str(destination)]
+def probe_frames(source):
+    fps = float(source['fps'])
+    contact = Fraction(source['trajectory']['collision']['first_contact_substep'],
+                       source['trajectory']['timing']['physics_hz'])
+    result = {}
+    for name, offset in PROBE_OFFSETS_MS.items():
+        # Round the exact physics contact time plus offset; ties go to the later frame.
+        target = (contact + Fraction(offset, 1000)) * source["fps"] + Fraction(1, 2)
+        action_frame = target.numerator // target.denominator
+        require(0 <= action_frame < source['trajectory_frame_count'], f"{name}: probe outside action")
+        frame = source['trajectory_frame_offset'] + action_frame
+        result[name] = {"frame": frame, "trajectory_frame": action_frame,
+                        "time_seconds": frame / fps, "offset_ms": offset,
+                        "image_path": f"{source['condition_id']}_{name}.png"}
+    return result
 
 
-def verify_faststart(path):
-    atoms = []
-    with path.open("rb") as file:
-        end = path.stat().st_size
-        while file.tell() < end:
-            start = file.tell()
-            header = file.read(8)
-            require(len(header) == 8, f"{path}: truncated MP4 atom")
-            size, kind = struct.unpack(">I4s", header)
-            if size == 1:
-                size = struct.unpack(">Q", file.read(8))[0]
-            elif size == 0:
-                size = end - start
-            require(size >= 8 and start + size <= end, f"{path}: invalid MP4 atom")
-            atoms.append(kind)
-            file.seek(start + size)
-    require(b"moov" in atoms and b"mdat" in atoms and atoms.index(b"moov") < atoms.index(b"mdat"),
-            f"{path}: MP4 is not faststart")
+def ffmpeg_command(ffmpeg, source, destination, crf=15, overwrite=False, preset='slow'):
+    rate = str(source['fps'])
+    command = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-y' if overwrite else '-n']
+    empty, preview = source['empty_scene_frames'], source['object_preview_frames']
+    if empty:
+        command += ['-loop', '1', '-framerate', rate, '-i', str(source['directory'] / 'empty_scene.png')]
+    command += ['-framerate', rate, '-start_number', '0', '-i', str(source['directory'] / 'frame_%04d.png')]
+    if empty:
+        filters = (f'[0:v]trim=end_frame={empty},setpts=PTS-STARTPTS[empty];'
+                   f'[1:v]tpad=start_mode=clone:start={preview},setpts=PTS-STARTPTS[action];'
+                   '[empty][action]concat=n=2:v=1:a=0[out]')
+        command += ['-filter_complex_threads', '1', '-filter_complex', filters, '-map', '[out]']
+    else:
+        command += ['-vf', f'tpad=start_mode=clone:start={preview}', '-map', '0:v:0']
+    return command + ['-an', '-c:v', 'libx264', '-preset', preset, '-crf', str(crf),
+                      '-threads:v', '1', '-filter_threads', '1', '-pix_fmt', 'yuv420p',
+                      '-r', rate, '-fps_mode', 'cfr', '-frames:v', str(source['frame_count']),
+                      '-movflags', '+faststart', str(destination)]
 
 
 def probe_video(ffprobe, path, source):
-    command = [ffprobe, "-v", "error", "-count_frames", "-show_frames", "-show_entries",
-               "stream=codec_type,codec_name,pix_fmt,width,height,avg_frame_rate,r_frame_rate,nb_frames,nb_read_frames,duration,duration_ts,time_base:format=duration:frame=best_effort_timestamp",
-               "-of", "json", str(path)]
-    result = subprocess.run(command, check=True, capture_output=True, text=True)
-    require(not result.stderr.strip(), f"{path}: FFprobe decoding errors: {result.stderr.strip()}")
-    data = json.loads(result.stdout)
-    streams = data["streams"]
-    require(len(streams) == 1 and streams[0]["codec_type"] == "video", f"{path}: expected one video stream and no audio")
-    video = streams[0]
-    require(video["codec_name"] == "h264" and video["pix_fmt"] == "yuv420p", f"{path}: unexpected codec/pixel format")
-    require([video["width"], video["height"]] == source["resolution"], f"{path}: incorrect resolution")
-    require(Fraction(video["avg_frame_rate"]) == Fraction(video["r_frame_rate"]) == source["fps"],
-            f"{path}: incorrect frame rate")
-    count = source["frame_count"]
-    require(int(video["nb_read_frames"]) == int(video["nb_frames"]) == len(data["frames"]) == count,
-            f"{path}: incorrect decoded frame count")
-    time_base = Fraction(video["time_base"])
-    duration = count / source["fps"]
-    require(int(video["duration_ts"]) * time_base == duration, f"{path}: incorrect exact stream duration")
-    for label, value in (("stream", video["duration"]), ("container", data["format"]["duration"])):
-        require(math.isclose(float(value), float(duration), rel_tol=0, abs_tol=1e-6),
-                f"{path}: incorrect {label} duration: {value}")
-    require(all(int(frame["best_effort_timestamp"]) * time_base == i / source["fps"]
-                for i, frame in enumerate(data["frames"])), f"{path}: nonconstant frame timing")
-    verify_faststart(path)
-    return {"codec": video["codec_name"], "pixel_format": video["pix_fmt"],
-            "fps": float(source["fps"]), "fps_rational": str(source["fps"]),
-            "frame_count": count, "resolution": source["resolution"],
-            "duration_seconds": float(duration), "duration_rational": str(duration),
-            "probed_duration_seconds": float(data["format"]["duration"]),
-            "audio_streams": 0, "constant_frame_rate": True, "faststart": True,
-            "trajectory_frame_count": source.get("trajectory_frame_count", count),
-            "hold_start_frames": source.get("hold_start_frames", 0),
-            "hold_end_frames": source.get("hold_end_frames", 0),
-            "trajectory_frame_offset": source.get("hold_start_frames", 0)}
+    command = [ffprobe, '-v', 'error', '-count_frames', '-show_entries',
+               'stream=codec_type,codec_name,pix_fmt,width,height,avg_frame_rate,nb_read_frames,duration:format=duration',
+               '-of', 'json', str(path)]
+    data = json.loads(subprocess.run(command, check=True, capture_output=True, text=True).stdout)
+    require(len(data['streams']) == 1, 'Expected one video stream without audio')
+    stream = data['streams'][0]
+    require(stream['codec_name'] == 'h264' and stream['pix_fmt'] == 'yuv420p', 'Unexpected video format')
+    require([stream['width'], stream['height']] == source['resolution'], 'Incorrect video resolution')
+    require(Fraction(stream['avg_frame_rate']) == source['fps'], 'Incorrect video FPS')
+    require(int(stream['nb_read_frames']) == source['frame_count'], 'Incorrect video frame count')
+    duration = float(source['frame_count'] / source['fps'])
+    require(abs(float(data['format']['duration']) - duration) < 1e-5, 'Incorrect video duration')
+    return {"fps": float(source['fps']), "frame_count": source['frame_count'],
+            "resolution": source['resolution'], "duration_seconds": duration,
+            "trajectory_frame_count": source['trajectory_frame_count'],
+            "trajectory_frame_offset": source['trajectory_frame_offset'],
+            "empty_scene_frames": source['empty_scene_frames'], "object_preview_frames": source['object_preview_frames']}
 
 
-def matching_videos(entries):
-    require(len({(e["frame_count"], e["duration_rational"], e["fps_rational"], tuple(e["resolution"]),
-                  e.get("hold_start_frames", 0), e.get("hold_end_frames", 0))
-                 for e in entries}) <= 1, "Encoded videos differ in frame count, duration, FPS, or resolution")
+def encode_condition(ffmpeg, ffprobe, source, output_dir, crf=15, preset='slow'):
+    condition = source['condition_id']
+    probes = probe_frames(source)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f'.{condition}-', dir=output_dir) as temporary:
+        temporary = Path(temporary)
+        video = temporary / f'{condition}.mp4'
+        subprocess.run(ffmpeg_command(ffmpeg, source, video, crf, True, preset), check=True)
+        entry = probe_video(ffprobe, video, source)
+        expression = '+'.join(f'eq(n,{p["frame"]})' for p in probes.values())
+        subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-i', str(video),
+                        '-vf', f"select='{expression}'", '-fps_mode', 'vfr', '-frames:v', str(len(probes)),
+                        '-threads:v', '1', '-filter_threads', '1', '-start_number', '0',
+                        str(temporary / 'probe_%02d.png')], check=True)
+        for i, probe in enumerate(probes.values()):
+            (temporary / f'probe_{i:02d}.png').replace(output_dir / probe['image_path'])
+        video.replace(output_dir / video.name)
+    return {"condition_id": condition, "video_path": f'{condition}.mp4', **entry,
+            "first_contact_time_seconds": source['trajectory']['collision']['first_contact_time_seconds'],
+            "probes": probes}
 
 
-def read_manifest(path):
-    if not path.exists():
-        return {}
-    manifest = read_json(path)
-    require(manifest["schema_version"] == 1, "Unsupported video manifest schema")
-    entries = {}
-    for entry in manifest["conditions"]:
-        condition = entry["condition_id"]
-        require(condition not in entries, f"Duplicate video manifest condition: {condition}")
-        require(entry["video_path"] == condition + ".mp4", "Unexpected video manifest path")
-        entries[condition] = entry
-    return entries
+def save_manifest(output_dir, entries, expected_ids, *, practice_entry=None):
+    # Main subset builds advertise their fresh outputs. Practice is independent:
+    # building it preserves the existing main manifest, and vice versa.
+    path = output_dir / 'video_manifest.json'
+    previous = read_json(path) if path.exists() else {}
+    manifest = {
+        "complete_condition_set": {e['condition_id'] for e in entries} == set(expected_ids),
+        "expected_condition_count": len(expected_ids),
+        "duration_policy": 'empty scene, stationary objects, fixed action; no endpoint hold',
+        "conditions": entries}
+    if practice_entry is not None:
+        manifest = previous or manifest
+        manifest['practice'] = practice_entry
+    elif 'practice' in previous:
+        manifest['practice'] = previous['practice']
+    atomic_json(path, manifest)
 
 
-def save_manifest(path, entries, catalog, build=None):
-    matching_videos(entries.values())
-    data = {"schema_version": 1, "video_paths_relative_to": "this manifest directory",
-            "complete_eight_conditions": len(entries) == len(catalog) == 8 and set(entries) == set(catalog),
-            "duration_policy": "All trajectory frames plus configured endpoint holds; duration = frame_count / fps. No trial-specific truncation.",
-            "conditions": [entries[key] for key in sorted(entries)]}
-    if build is not None:
-        data["build"] = build
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as file:
-        temporary = Path(file.name)
-        json.dump(data, file, indent=2, allow_nan=False)
-        file.write("\n")
-    try:
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def encode_condition(source, output, ffmpeg, ffprobe, versions, crf=15, overwrite=False, preset="slow"):
-    """Shared atomic encode/probe/publish operation for the CLI and full builder."""
-    condition = source["condition_id"]
-    target = output / (condition + ".mp4")
-    require(overwrite or not target.exists(), f"{target} exists; use --overwrite")
-    print(f"Encoding {condition}...", flush=True)
-    with tempfile.TemporaryDirectory(prefix=".encode-", dir=output) as temp:
-        temporary = Path(temp) / target.name
-        command = ffmpeg_command(ffmpeg, source, temporary, crf, preset=preset)
-        subprocess.run(command, check=True)
-        verified = probe_video(ffprobe, temporary, source)
-        entry = {"condition_id": condition, "video_path": target.name, **verified,
-                 "video_sha256": sha256(temporary),
-                 "source_render_metadata_path": os.path.relpath(source["metadata_path"], output),
-                 "source_render_metadata_sha256": source["metadata_sha256"],
-                 "source_png_sequence_sha256": source["png_sequence_sha256"],
-                 "source_render_metadata": source["render"],
-                 "encoding": {"crf": crf, "preset": preset, "encoder": "libx264", "threads": 1,
-                              "command": ffmpeg_command(ffmpeg, source, target, crf, overwrite, preset), **versions}}
-        if overwrite:
-            temporary.replace(target)
-        else:
-            os.link(temporary, target)
-    print(f"Verified {condition}: {verified['frame_count']} frames, {verified['duration_seconds']:.6f} s -> {target}", flush=True)
-    return entry
-
-
-def arguments(argv=None):
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    selection = parser.add_mutually_exclusive_group(required=True)
-    selection.add_argument("--condition", help="Condition ID from generated trajectory metadata")
-    selection.add_argument("--all", action="store_true", help="Require and encode exactly eight conditions")
-    parser.add_argument("--trajectory-dir", type=Path, default=ROOT / "stimuli/generated/trajectories")
-    parser.add_argument("--frames-dir", type=Path, default=ROOT / "results/stimuli/final/pngs")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "stimuli/generated/videos")
-    parser.add_argument("--crf", type=int, default=15, choices=range(52), metavar="0..51")
-    parser.add_argument("--preset", default="slow", choices=("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"))
-    parser.add_argument("--hold-start", type=float, default=0, help="Extra seconds displaying the first frame")
-    parser.add_argument("--hold-end", type=float, default=0, help="Extra seconds displaying the final frame")
-    parser.add_argument("--overwrite", action="store_true", help="Explicitly allow replacement of existing selected videos")
-    parser.add_argument("--dry-run", action="store_true", help="Validate sources and print commands; write nothing")
-    return parser.parse_args(argv)
-
-
-def main(argv=None):
-    args = arguments(argv)
-    catalog = discover(args.trajectory_dir.resolve())
-    require(not args.all or len(catalog) == 8,
-            f"--all requires exactly eight unique enabled conditions; found {len(catalog)}: {', '.join(catalog)}")
-    require(args.all or args.condition in catalog, f"Unknown condition: {args.condition}")
-    selected = sorted(catalog) if args.all else [args.condition]
-    sources = [validate_source(c, catalog[c], args.frames_dir.resolve()) for c in selected]
-    matching_sources(sources)
-    sources = [with_holds(s, args.hold_start, args.hold_end) for s in sources]
-    output = args.output_dir.resolve()
-    for source in sources:
-        target = output / (source["condition_id"] + ".mp4")
-        require(args.overwrite or not target.exists(), f"{target} already exists; use --overwrite explicitly")
-    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
-    require(ffmpeg and ffprobe, "Both ffmpeg and ffprobe must be installed and on PATH")
-    for source in sources:
-        print(f"Validated {source['condition_id']}: {source['frame_count']} frames, {source['fps']} fps, {source['resolution']}", flush=True)
-    if args.dry_run:
-        for source in sources:
-            print(shlex.join(ffmpeg_command(ffmpeg, source, output / (source["condition_id"] + ".mp4"), args.crf, args.overwrite, args.preset)))
-        return
-    versions = {name: subprocess.run([tool, "-version"], check=True, capture_output=True, text=True).stdout.splitlines()[0]
-                for name, tool in (("ffmpeg", ffmpeg), ("ffprobe", ffprobe))}
-    output.mkdir(parents=True, exist_ok=True)
-    lock = output / ".encode.lock"
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument('--all', action='store_true')
+    inputs.add_argument('--condition')
+    parser.add_argument('--trajectory-dir', type=Path, default=ROOT / 'stimuli/generated/trajectories')
+    parser.add_argument('--frames-dir', type=Path, default=ROOT / 'results/stimuli/final/pngs')
+    parser.add_argument('--output-dir', type=Path, default=ROOT / 'stimuli/generated/videos')
+    parser.add_argument('--empty-scene-seconds', type=float, default=.8)
+    parser.add_argument('--object-preview-seconds', type=float, default=.2)
+    parser.add_argument('--crf', type=int, default=15)
+    parser.add_argument('--preset', default='slow')
+    args = parser.parse_args()
     try:
-        lock_file = lock.open("x")
-    except FileExistsError:
-        raise ValueError(f"{lock} exists; another encoder may be running. Remove only after confirming it has stopped.") from None
-    try:
-        with lock_file:
-            lock_file.write(f"{os.getpid()}\n")
-        manifest_path = output / "video_manifest.json"
-        entries = read_manifest(manifest_path)
-        require(set(entries) <= set(catalog), "Video manifest contains conditions absent from current trajectory metadata")
-        # Preserve and re-probe unselected entries when updating one condition.
-        for condition, entry in entries.items():
-            if condition not in selected:
-                source = validate_source(condition, catalog[condition], args.frames_dir.resolve())
-                source = with_holds(source, args.hold_start, args.hold_end)
-                matching_sources([sources[0], source])
-                require(all(entry.get(k, 0) == source[k] for k in ("hold_start_frames", "hold_end_frames")),
-                        f"{condition}: existing endpoint holds differ; rebuild all conditions with the same holds")
-                require(entry["source_render_metadata_sha256"] == source["metadata_sha256"],
-                        f"{condition}: existing manifest has stale render metadata")
-                require(entry["video_sha256"] == sha256(output / entry["video_path"]),
-                        f"{condition}: existing video differs from its manifest")
-                entries[condition] = {**entry, **probe_video(ffprobe, output / entry["video_path"], source)}
-        # Drop selected old records in memory; add each back only after verification.
-        entries = {c: e for c, e in entries.items() if c not in selected}
-        for source in sources:
-            condition = source["condition_id"]
-            entry = encode_condition(source, output, ffmpeg, ffprobe, versions, args.crf, args.overwrite, args.preset)
-            entries[condition] = entry
-            save_manifest(manifest_path, entries, catalog)
-        matching_videos(entries.values())
-        require(not args.all or len(entries) == 8, "Expected eight verified videos")
-        save_manifest(manifest_path, entries, catalog)
-        print(f"Complete: {len(sources)} video(s) encoded and verified. Manifest: {manifest_path}", flush=True)
-    finally:
-        lock.unlink(missing_ok=True)
+        import tomllib
+    except ImportError:
+        import tomli as tomllib
+    config = tomllib.loads((ROOT / 'stimuli/config/stimuli.toml').read_text())
+    ids = [c['condition_id'] for c in config['conditions'] if c.get('enabled', config['defaults'].get('enabled', True))]
+    selected = ids if args.all else [args.condition]
+    require(all(c in ids for c in selected), 'Unknown or disabled condition')
+    ffmpeg, ffprobe = shutil.which('ffmpeg'), shutil.which('ffprobe')
+    require(ffmpeg and ffprobe, 'FFmpeg and FFprobe required')
+    entries = []
+    for condition in selected:
+        path = args.trajectory_dir / f'{condition}.json'
+        source = with_intro(validate_source(condition, (path, read_json(path)), args.frames_dir),
+                            args.empty_scene_seconds, args.object_preview_seconds)
+        entries.append(encode_condition(ffmpeg, ffprobe, source, args.output_dir, args.crf, args.preset))
+    save_manifest(args.output_dir, entries, ids)
+    print(f'Encoded {len(entries)} videos -> {args.output_dir}')
 
 
-if __name__ == "__main__":
-    try:
-        main()
-    except (ValueError, KeyError, OSError, subprocess.CalledProcessError) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr, flush=True)
-        sys.exit(1)
+if __name__ == '__main__':
+    main()
