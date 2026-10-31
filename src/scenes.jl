@@ -16,6 +16,8 @@ end
 struct RampSceneMetadata
     mass_ratio::Float64
     obj_frictions::NTuple{2,Float64}
+    surface_frictions::NTuple{2,Float64}
+    ramp_clearance::Float64
     obj_positions::NTuple{2,Float64}
     slope::Float64
     tableRampIntersection::Float64
@@ -54,23 +56,26 @@ function _ramp_scene_metadata(mass_ratio::Float64,
                               tableRampIntersection::Float64,
                               restitution::Float64,
                               obj_ramp_dims::Vector{Float64},
-                              obj_table_dims::Vector{Float64})
+                              obj_table_dims::Vector{Float64},
+                              surface_frictions::NTuple{2,Float64}, ramp_clearance::Float64)
     base_dims = [5.0, 1.0, 0.75]
     table_dims = [base_dims[1] + 0.2, base_dims[2] + 0.2, 0.1]
     theta_radians = -atan(slope)
-    lift = obj_ramp_dims[3] / 2
+    lift = obj_ramp_dims[3] / 2 + ramp_clearance
 
     ramp_position = [-2 + tableRampIntersection, -base_dims[2] / 2, 0.0]
     ramp_obj_position = [
-        -2 + 2 * obj_positions[1] + tableRampIntersection + lift * cos(theta_radians),
+        -2 + 2 * obj_positions[1] + tableRampIntersection - lift * sin(theta_radians),
         0.0,
-        (2 - 2 * obj_positions[1]) * slope - lift * sin(theta_radians)
+        (2 - 2 * obj_positions[1]) * slope + lift * cos(theta_radians)
     ]
     table_obj_position = [2.5 * (obj_positions[2] - 1), 0.0, obj_table_dims[3] / 2]
 
     return RampSceneMetadata(
         mass_ratio,
         obj_frictions,
+        surface_frictions,
+        ramp_clearance,
         obj_positions,
         slope,
         tableRampIntersection,
@@ -107,6 +112,8 @@ function ramp(mass_ratio::Float64,
               restitution::Float64=DEFAULT_SCENE_RESTITUTION,
               obj_ramp_dims=DEFAULT_RAMP_OBJECT_DIMS,
               obj_table_dims=DEFAULT_TABLE_OBJECT_DIMS,
+              surface_frictions::NTuple{2,Float64}=(0.5, 0.5),
+              ramp_clearance::Float64=0.001,
               return_metadata::Bool=false)
 
     _positive_finite(mass_ratio, "mass_ratio")
@@ -114,8 +121,10 @@ function ramp(mass_ratio::Float64,
     obj_table_dims = collect(_object_dimensions(obj_table_dims, "obj_table_dims"))
     isfinite(restitution) && 0.0 <= restitution <= 1.0 ||
         throw(ArgumentError("restitution must be between 0 and 1"))
+    all(x -> isfinite(x) && x >= 0, surface_frictions) || throw(ArgumentError("invalid surface friction"))
+    isfinite(ramp_clearance) && ramp_clearance >= 0 || throw(ArgumentError("invalid ramp clearance"))
     metadata = _ramp_scene_metadata(mass_ratio, obj_frictions, obj_positions,
-        slope, tableRampIntersection, restitution, obj_ramp_dims, obj_table_dims)
+        slope, tableRampIntersection, restitution, obj_ramp_dims, obj_table_dims, surface_frictions, ramp_clearance)
 
     # for debugging
     #client = @pycall pb.connect(pb.GUI)::Int64
@@ -137,7 +146,7 @@ function ramp(mass_ratio::Float64,
     # Create the tabletop (a flat box)
     table_col_id = pb.createCollisionShape(pb.GEOM_BOX, halfExtents=table_dims / 2, physicsClientId=client)
     table_body_id = pb.createMultiBody(baseCollisionShapeIndex=table_col_id, basePosition=[0, 0, -table_dims[3] / 2], physicsClientId=client)
-    pb.changeDynamics(table_body_id, -1; mass=0.0, restitution=restitution, physicsClientId=client)
+    pb.changeDynamics(table_body_id, -1; mass=0.0, lateralFriction=surface_frictions[2], restitution=restitution, physicsClientId=client)
     pb.changeVisualShape(table_body_id, -1, rgbaColor=grey .+ 0.2, physicsClientId=client)
 
     # Create the four frame-like boxes around the tabletop
@@ -170,7 +179,7 @@ function ramp(mass_ratio::Float64,
     ramp_col_id = pb.createCollisionShape(pb.GEOM_MESH, fileName="ramp.obj", physicsClientId=client, meshScale=metadata.ramp_dims)
     ramp_position = metadata.ramp_position
     ramp_obj_id = pb.createMultiBody(baseCollisionShapeIndex=ramp_col_id, basePosition=ramp_position, physicsClientId=client)
-    pb.changeDynamics(ramp_obj_id, -1; mass=0.0, restitution=restitution, physicsClientId=client)
+    pb.changeDynamics(ramp_obj_id, -1; mass=0.0, lateralFriction=surface_frictions[1], restitution=restitution, physicsClientId=client)
     pb.changeVisualShape(ramp_obj_id, -1, rgbaColor=[1, 1, 1, 1], physicsClientId=client)
 
     # add a floor
@@ -221,6 +230,8 @@ function create_ramp_simulation(; mass_ratio::Float64=2.0,
                                 restitution::Float64=DEFAULT_SCENE_RESTITUTION,
                                 obj_ramp_dims=DEFAULT_RAMP_OBJECT_DIMS,
                                 obj_table_dims=DEFAULT_TABLE_OBJECT_DIMS,
+                                surface_frictions::NTuple{2,Float64}=(0.5, 0.5),
+                                ramp_clearance::Float64=0.001,
                                 connect_mode=pb.DIRECT)
     client, obj_1, obj_2, ramp_surface_id, table_surface_id, metadata = ramp(
         mass_ratio,
@@ -230,6 +241,8 @@ function create_ramp_simulation(; mass_ratio::Float64=2.0,
         tableRampIntersection;
         connect_mode=connect_mode,
         restitution=restitution,
+        surface_frictions=surface_frictions,
+        ramp_clearance=ramp_clearance,
         obj_ramp_dims=obj_ramp_dims,
         obj_table_dims=obj_table_dims,
         return_metadata=true
