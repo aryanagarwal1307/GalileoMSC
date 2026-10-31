@@ -1,38 +1,28 @@
-/**
- * Researcher editing point for the visual prototype.
- *
- * Video names must match ../stimuli/generated/videos/video_manifest.json. Scene IDs
- * identify physical setups: use each ID only once in a four-trial run. Frames
- * are zero-based MP4 frames at the manifest's 60 fps. First physical contact is
- * frame 79 in the current trajectory metadata. The configured collision frame
- * is a few frames later so the effect is visible before the cut.
- *
- * The ramp object moves; the table object is initially stationary.
- * Changing text, frame targets, videos, groups, slider, or timing needs no edits
- * elsewhere. `npm run build` checks the manifest and files.
- */
+/** Probe offsets are relative to exact first physical contact. */
+export const materialPairs = [
+  "wood_to_brick", "brick_to_wood", "wood_to_metal",
+  "metal_to_wood", "brick_to_metal", "metal_to_brick",
+] as const;
+export type MaterialPair = typeof materialPairs[number];
+export type StudyType = "pre" | "during" | "post";
+export type Scene = { sceneId: string; kind: "congruent" | "incongruent" | "practice"; video: string };
+
 export const experimentConfig = {
-  scenes: [
-    { sceneId: "wood_to_brick", kind: "ordinary", video: "wood_to_brick_congruent.mp4" },
-    { sceneId: "brick_to_wood", kind: "ordinary", video: "brick_to_wood_congruent.mp4" },
-    { sceneId: "metal_to_wood", kind: "ordinary", video: "metal_to_wood_congruent.mp4" },
-    { sceneId: "wood_to_metal", kind: "violation", video: "wood_to_metal_violation.mp4" },
-  ],
-  // Each group uses all three probe positions once among the ordinary scenes.
-  // Ordinary scene order is shuffled anew when Start is pressed.
-  groups: {
-    "1": { wood_to_brick: "preCollision", brick_to_wood: "collision", metal_to_wood: "postCollision" },
-    "2": { wood_to_brick: "collision", brick_to_wood: "postCollision", metal_to_wood: "preCollision" },
-    "3": { wood_to_brick: "postCollision", brick_to_wood: "preCollision", metal_to_wood: "collision" },
+  scenes: materialPairs.flatMap((sceneId): Scene[] => [
+    { sceneId, kind: "congruent", video: `${sceneId}_congruent.mp4` },
+    { sceneId, kind: "incongruent", video: `${sceneId}_violation.mp4` },
+  ]),
+  // Set experiment_type in each JATOS study's JSON input. This is a local default.
+  defaultStudyType: "pre" as StudyType,
+  studyProbes: { pre: "preCollision", during: "collision", post: "postCollision" },
+  probeOffsetsMs: {
+    baseline: -1000,
+    preCollision: -200,
+    collision: 200,
+    postCollision: 1000,
   },
-  probeFrames: {
-    preCollision: 67,
-    collision: 87,
-    postCollision: 100,
-  },
-  // Trial 4 always uses one of these, chosen at random for each run.
-  violationProbeChoices: ["collision", "postCollision"],
-  fixationMs: 1500,
+  recruitment: { quotaPerPair: 40, batchSessionKey: "galileo_probe_quotas_v1" },
+  fixationMs: 2000,
   // Hold the last visible video frame before showing the response slider.
   // Set to 0 for an immediate transition. Duration is in milliseconds.
   freezeFrameMs: 1500,
@@ -50,7 +40,7 @@ export const experimentConfig = {
     continueButton: "Continue",
   },
   // Welcome, instruction, practice, quiz, and debrief wording all live here.
-  // Practice repeats one ordinary video and does not change the four main trials.
+  // Practice uses a separate equal-mass solid-gray scene.
   onboarding: {
     welcome: {
       title: "Hi, welcome to our study!",
@@ -65,13 +55,13 @@ export const experimentConfig = {
         title: "Instructions",
         paragraphs: [
           "This task can be challenging. Sometimes you will be certain about your response; other times you may not be. Give your best estimate each time.",
-          "There are four short trials. Please stay focused while each scene plays.",
+          "There are {trialCount} short trials. Please stay focused while each scene plays.",
         ],
       },
       {
         title: "What you will do",
         paragraphs: [
-          "You will watch an object on a ramp move towards another object on a table. The video will pause before, during, or after their collision.",
+          "You will watch an object on a ramp move towards another object on a table. The video will pause before or after their collision.",
           "After it pauses, use the first slider to estimate how heavy the ramp object is compared with the table object. Use the second slider to show how confident you are in that estimate.",
           "There's no need to think for too long on each trial - just provide your best guess.",
         ],
@@ -79,15 +69,16 @@ export const experimentConfig = {
       {
         title: "Practice",
         paragraphs: [
-          "Next, you will see a practice scene and try both sliders. The practice scene will not count as one of the four trials.",
+          "Next, you will see a practice scene and try both sliders. The practice scene will not count as one of the main trials.",
         ],
       },
     ],
     nextButton: "Next",
     practice: {
-      sceneId: "wood_to_brick",
+      scene: { sceneId: "practice_equal_mass", kind: "practice", video: "practice_equal_mass.mp4" },
       probe: "postCollision",
       label: "Practice",
+      feedback: "The two blocks had equal mass. You will not receive any more feedback during the main experiment.",
     },
     quiz: {
       title: "Check your understanding",
@@ -117,11 +108,28 @@ export const experimentConfig = {
     },
     countdown: {
       title: "The experiment begins in",
-      seconds: 5,
+      seconds: 3,
     },
     debrief: {
       title: "Before you finish",
-      optionalNote: "Both questions are optional.",
+      requiredQuestions: [
+        {
+          id: "understood_instructions",
+          prompt: "Were you able to understand the instructions?",
+        },
+        {
+          id: "undivided_attention",
+          prompt: "Were you able to give the task your full attention throughout?",
+          detail: "Please select No if you had any distractions, such as a phone call. You will receive full credit regardless of your answer. Please answer honestly to help us assess data quality.",
+        },
+        {
+          id: "noticed_materials_and_weights",
+          prompt: "Did you notice that the objects differed in their materials and weights?",
+        },
+      ],
+      yesLabel: "Yes",
+      noLabel: "No",
+      optionalNote: "The two written questions below are optional.",
       strategyQuestion: "Did you use any strategies while doing this task?",
       commentsQuestion: "Do you have any additional comments?",
       finishButton: "Finish",
@@ -133,7 +141,7 @@ export const experimentConfig = {
     max: 100,
     step: 1,
     initialMean: 0,
-    maxMultiple: 4,
+    maxMultiple: 10,
     confidenceMin: 0,
     confidenceMax: 100,
     confidenceStep: 1,
@@ -144,6 +152,4 @@ export const experimentConfig = {
 } as const;
 
 export type ExperimentConfig = typeof experimentConfig;
-export type ProbeName = keyof ExperimentConfig["probeFrames"];
-export type GroupName = keyof ExperimentConfig["groups"];
-export type Scene = ExperimentConfig["scenes"][number];
+export type ProbeName = keyof ExperimentConfig["probeOffsetsMs"];

@@ -1,76 +1,94 @@
-import type { ExperimentConfig, ProbeName } from "./experiment.config";
+import { materialPairs, type ExperimentConfig, type ProbeName, type Scene } from "./experiment.config";
 
-export type VideoManifest = {
-  conditions: Array<{
+export type VideoEntry = {
     condition_id: string;
     video_path: string;
     fps: number;
     frame_count: number;
-  }>;
+    first_contact_time_seconds?: number;
+    trajectory_frame_offset?: number;
+    probes?: Partial<Record<ProbeName, { frame: number; trajectory_frame: number; time_seconds: number; offset_ms: number; image_path: string }>>;
 };
+
+export type VideoManifest = {
+  conditions: VideoEntry[];
+  practice?: VideoEntry;
+};
+
+export function videoEntryFor(scene: Scene, manifest: VideoManifest) {
+  return scene.kind === "practice" ? manifest.practice :
+    manifest.conditions.find((item) => item.video_path === scene.video);
+}
+
+export function probeFor(scene: Scene, probe: ProbeName, manifest: VideoManifest) {
+  const entry = videoEntryFor(scene, manifest);
+  const target = entry?.probes?.[probe];
+  if (!target) throw new Error(`${scene.video}: missing probe metadata; rebuild with build_stimuli.py ${scene.kind === "practice" ? "--practice" : "--all"}.`);
+  return target;
+}
 
 export function validateExperiment(config: ExperimentConfig, manifest: VideoManifest): string[] {
   const errors: string[] = [];
   const scenes = config.scenes;
-  const names = Object.keys(config.probeFrames) as ProbeName[];
-  const ordinary = scenes.filter((scene) => scene.kind === "ordinary");
-  const violations = scenes.filter((scene) => scene.kind === "violation");
-  if (scenes.length !== 4 || ordinary.length !== 3 || violations.length !== 1) {
-    errors.push("Configure exactly three ordinary scenes and one violation scene.");
+  const names = Object.keys(config.probeOffsetsMs) as ProbeName[];
+  const ordinary = scenes.filter((scene) => scene.kind === "congruent");
+  const violations = scenes.filter((scene) => scene.kind === "incongruent");
+  if (scenes.length !== 12 || ordinary.length !== 6 || violations.length !== 6) {
+    errors.push("Configure six congruent and six incongruent scenes.");
   }
-  if (new Set(scenes.map((scene) => scene.sceneId)).size !== scenes.length) {
-    errors.push("Each physical sceneId must occur once.");
+  if (new Set(scenes.map((scene) => `${scene.sceneId}:${scene.kind}`)).size !== scenes.length) {
+    errors.push("Each sceneId must occur once per congruence condition.");
   }
   if (new Set(scenes.map((scene) => scene.video)).size !== scenes.length) {
     errors.push("Each configured video must occur once.");
   }
   const byVideo = new Map(manifest.conditions.map((entry) => [entry.video_path, entry]));
-  for (const scene of scenes) {
+  for (const scene of [...scenes, config.onboarding.practice.scene]) {
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]*\.mp4$/.test(scene.video)) {
       errors.push(`${scene.video} must be a plain MP4 filename.`);
     }
-    const entry = byVideo.get(scene.video);
+    const entry = scene.kind === "practice" ? manifest.practice : byVideo.get(scene.video);
     if (!entry) {
       errors.push(`${scene.video} is missing from the video manifest.`);
       continue;
     }
-    if (entry.condition_id !== `${scene.sceneId}_${scene.kind === "ordinary" ? "congruent" : "violation"}`) {
+    const conditionId = scene.kind === "practice" ? scene.sceneId :
+      `${scene.sceneId}_${scene.kind === "congruent" ? "congruent" : "violation"}`;
+    if (entry.condition_id !== conditionId || entry.video_path !== scene.video) {
       errors.push(`${scene.video} does not match scene ${scene.sceneId} and its trial kind.`);
     }
     for (const name of names) {
-      const frame = config.probeFrames[name];
+      const target = entry.probes?.[name];
+      if (!target) {
+        errors.push(`${scene.video}: missing ${name} probe; rebuild with build_stimuli.py ${scene.kind === "practice" ? "--practice" : "--all"}.`);
+        continue;
+      }
+      const frame = target.frame;
+      const expectedFrame = entry.first_contact_time_seconds === undefined || entry.trajectory_frame_offset === undefined ? NaN :
+        entry.trajectory_frame_offset + Math.floor((entry.first_contact_time_seconds + config.probeOffsetsMs[name] / 1000) * entry.fps + 0.5 + 1e-9);
+      if (target.offset_ms !== config.probeOffsetsMs[name] || frame !== expectedFrame ||
+          Math.abs(target.time_seconds - frame / entry.fps) > 1e-8 ||
+          !/^[A-Za-z0-9][A-Za-z0-9_-]*\.png$/.test(target.image_path)) {
+        errors.push(`${scene.video}: invalid ${name} probe metadata.`);
+      }
       if (!Number.isInteger(frame) || frame < 0 || frame >= entry.frame_count) {
         errors.push(`${name} frame ${frame} is outside ${scene.video} (0–${entry.frame_count - 1}).`);
       }
     }
     if (!(entry.fps > 0)) errors.push(`${scene.video} has invalid FPS in the manifest.`);
   }
-  if (!(config.probeFrames.preCollision < config.probeFrames.collision &&
-        config.probeFrames.collision < config.probeFrames.postCollision)) {
-    errors.push("Probe frames must be ordered pre-collision < collision < post-collision.");
-  }
-  for (const [group, assignments] of Object.entries(config.groups)) {
-    const assignedScenes = Object.keys(assignments);
-    if (assignedScenes.length !== ordinary.length ||
-        ordinary.some((scene) => !assignedScenes.includes(scene.sceneId))) {
-      errors.push(`Group ${group} must assign every ordinary scene exactly once.`);
-    }
-    const probes = Object.values(assignments);
-    if (probes.length !== names.length || new Set(probes).size !== names.length ||
-        probes.some((probe) => !names.includes(probe as ProbeName))) {
-      errors.push(`Group ${group} must use each probe position once.`);
+  for (const pair of materialPairs) {
+    if (!ordinary.some((scene) => scene.sceneId === pair) || !violations.some((scene) => scene.sceneId === pair)) {
+      errors.push(`Missing congruent or incongruent scene for ${pair}.`);
     }
   }
-  if (Object.keys(config.groups).sort().join(",") !== "1,2,3") {
-    errors.push("Counterbalancing groups must be 1, 2, and 3.");
-  }
-  if (!config.violationProbeChoices.length ||
-      config.violationProbeChoices.some((probe) => probe !== "collision" && probe !== "postCollision")) {
-    errors.push("Violation probes must be collision and/or postCollision.");
+  for (const [type, probe] of Object.entries(config.studyProbes)) {
+    if (!(probe in config.probeOffsetsMs)) errors.push(`Invalid study probe for ${type}.`);
   }
   const practice = config.onboarding.practice;
-  if (!ordinary.some((scene) => scene.sceneId === practice.sceneId)) {
-    errors.push("Practice sceneId must identify one configured ordinary scene.");
+  if (new Set<string>(scenes.map((scene) => scene.sceneId)).has(practice.scene.sceneId) ||
+      new Set<string>(scenes.map((scene) => scene.video)).has(practice.scene.video)) {
+    errors.push("Practice must use a separate scene and video from the main trials.");
   }
   if (!names.includes(practice.probe)) {
     errors.push("Practice probe must be one of the configured probe positions.");

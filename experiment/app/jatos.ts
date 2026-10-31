@@ -2,6 +2,12 @@
 export interface JatosApi {
   onLoad(callback: () => void): void;
   urlQueryParameters: Record<string, string | undefined>;
+  studyInput?: { experiment_type?: string };
+  batchSessionVersioning?: boolean;
+  batchSession?: {
+    get(key: string): unknown;
+    set(key: string, value: unknown): PromiseLike<unknown>;
+  };
   studyId?: number;
   componentId?: number;
   batchId?: number;
@@ -9,7 +15,7 @@ export interface JatosApi {
   studyResultId?: number;
   componentResultId?: number;
   submitResultData(data: string): Promise<unknown>;
-  endStudyWithoutRedirect(): Promise<unknown>;
+  endStudy(): void;
 }
 
 declare global {

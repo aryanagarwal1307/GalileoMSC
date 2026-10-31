@@ -4,38 +4,44 @@ import "@fontsource/literata/latin-300.css";
 import "@fontsource/literata/latin-400.css";
 import "@fontsource/literata/latin-600.css";
 import "@fontsource/literata/latin-700.css";
-import { experimentConfig as config, type GroupName, type ProbeName, type Scene } from "./experiment.config";
-import { validateExperiment, type VideoManifest } from "./validate";
+import { experimentConfig as config, materialPairs, type MaterialPair, type StudyType, type ProbeName, type Scene } from "./experiment.config";
+import { probeFor, validateExperiment, videoEntryFor, type VideoManifest } from "./validate";
+import { planTrials, trialCount, type PlannedTrial } from "./design";
+import { allocateProbe, completeProbe, type ProbeAllocation } from "./allocation";
 import { createMassResponseControl } from "./slider";
+import { createConsentTrial } from "./consent";
+import { PreparationPlugin } from "./preparation";
+import consentUrl from "../assets/consent.html?url";
 import type { JatosApi } from "./jatos";
 import manifest from "../../stimuli/generated/videos/video_manifest.json";
 import "./style.css";
 
-type Assignment = { scene: Scene; probe: ProbeName; frame: number };
-type StopObservation = {
-  method: "video_frame_callback" | "time_fallback";
-  actualFrame: number;
-  actualTimeSeconds: number;
-  lastVisibleFrame: number;
-  lastVisibleTimeSeconds: number;
-};
+type Assignment = PlannedTrial & { frame: number };
 const app = document.querySelector<HTMLElement>("#app")!;
 const params = new URLSearchParams(location.search);
 let previewMode = params.get("preview") === "1";
-let requestedGroup = params.get("condition_group");
-const groups = Object.keys(config.groups) as GroupName[];
+let requestedType = params.get("experiment_type");
+const studyTypes: StudyType[] = ["pre", "during", "post"];
 const videoUrls = new Map<string, string>();
+const probeImages = new Map<string, HTMLImageElement>();
+const targetFor = (scene: Scene, probe: ProbeName) => probeFor(scene, probe, manifest as VideoManifest);
 let previewPanel: HTMLElement | null = null;
 let previewPlan: HTMLElement | null = null;
 let activeReplay: (() => void) | null = null;
-let selectedGroup: GroupName = groups.includes(requestedGroup as GroupName) ? requestedGroup as GroupName : "1";
-let groupAssignmentMethod = "researcher_selection";
+let selectedType: StudyType = studyTypes.includes(requestedType as StudyType) ? requestedType as StudyType : config.defaultStudyType;
+let assignmentMethod = "researcher_selection";
+let probeAllocation: ProbeAllocation | null = null;
+let criticalPair: MaterialPair | null = null;
 let jsPsych: JsPsych;
 let quizPassed = false;
 let quizAttempts = 0;
 let failedQuizAttempts = 0;
 let jatosApi: JatosApi | null = null;
 const preloadErrors: string[] = [];
+let fullscreenRequired = false;
+let fullscreenOverlay: HTMLElement | null = null;
+let pausedForFullscreen: HTMLVideoElement | null = null;
+let resumeAfterFullscreen = false;
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", text = ""): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -44,34 +50,71 @@ function element<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", 
   return node;
 }
 
-function shuffle<T>(items: T[]): T[] {
-  const result = [...items];
-  for (let i = result.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [result[i], result[j]] = [result[j], result[i]];
-  }
-  return result;
+function fullscreenCapabilityError(): string | null {
+  if (!document.fullscreenEnabled) return "Fullscreen is unavailable in this browser window.";
+  return null;
 }
 
-function planFor(group: GroupName): Assignment[] {
-  const ordinary = shuffle(config.scenes.filter((scene) => scene.kind === "ordinary"));
-  const assignments: Assignment[] = ordinary.map((scene) => {
-    const probe = config.groups[group][scene.sceneId as keyof typeof config.groups[GroupName]] as ProbeName;
-    return { scene, probe, frame: config.probeFrames[probe] };
+async function enterRequiredFullscreen(): Promise<string | null> {
+  const capabilityError = fullscreenCapabilityError();
+  if (capabilityError) return capabilityError;
+  try {
+    if (!document.fullscreenElement) await document.documentElement.requestFullscreen();
+  } catch {
+    return "Fullscreen was blocked. Allow fullscreen and try again.";
+  }
+  if (!document.fullscreenElement) return "Fullscreen did not start. Please try again.";
+  return null;
+}
+
+document.addEventListener("fullscreenchange", () => {
+  if (!fullscreenRequired) return;
+  if (document.fullscreenElement) {
+    fullscreenOverlay?.remove();
+    fullscreenOverlay = null;
+    if (resumeAfterFullscreen && pausedForFullscreen?.isConnected) {
+      void pausedForFullscreen.play().catch(() => {});
+    }
+    pausedForFullscreen = null;
+    resumeAfterFullscreen = false;
+    return;
+  }
+  pausedForFullscreen = document.querySelector<HTMLVideoElement>(".video-source");
+  resumeAfterFullscreen = Boolean(pausedForFullscreen && !pausedForFullscreen.paused);
+  pausedForFullscreen?.pause();
+  if (fullscreenOverlay) return;
+  const overlay = element("div", "fullscreen-overlay");
+  const card = element("div", "start-card");
+  card.append(element("h2", "", "Return to fullscreen"));
+  card.append(element("p", "muted", "The experiment requires fullscreen. Playback is paused until you return."));
+  const status = element("p", "status-error");
+  status.setAttribute("role", "alert");
+  const button = element("button", "primary-button", "Return to fullscreen") as HTMLButtonElement;
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    const error = await enterRequiredFullscreen();
+    status.textContent = error ?? "";
+    button.disabled = false;
   });
-  const critical = config.scenes.find((scene) => scene.kind === "violation")!;
-  const probe = config.violationProbeChoices[Math.floor(Math.random() * config.violationProbeChoices.length)] as ProbeName;
-  assignments.push({ scene: critical, probe, frame: config.probeFrames[probe] });
-  return assignments;
+  card.append(status, button);
+  overlay.append(card);
+  document.body.append(overlay);
+  fullscreenOverlay = overlay;
+});
+
+function planFor(type: StudyType): Assignment[] {
+  return planTrials(type, criticalPair).map((assignment) => ({
+    ...assignment, frame: targetFor(assignment.scene, assignment.probe).frame,
+  }));
 }
 
 function describeAssignment(assignment: Assignment): string {
-  return `${assignment.scene.sceneId} · ${assignment.scene.kind} · ${assignment.probe} · frame ${assignment.frame}`;
+  return `${assignment.scene.sceneId} · ${assignment.phase} · ${assignment.probe} · frame ${assignment.frame}`;
 }
 
 function showPreviewPlan(plan: Assignment[], currentIndex = -1): void {
   if (!previewPlan) return;
-  previewPlan.replaceChildren(element("h3", "", `Group ${selectedGroup} assignments`));
+  previewPlan.replaceChildren(element("h3", "", `Study: ${selectedType} · ${plan.length} trials`));
   const list = element("ol", "assignment-list");
   plan.forEach((assignment, index) => {
     const item = element("li", index === currentIndex ? "is-current" : "", describeAssignment(assignment));
@@ -91,64 +134,51 @@ function showStart(error = ""): void {
   previewPlan = null;
   activeReplay = null;
   if (jatosApi && !previewMode && !error) {
-    const loading = element("section", "start-card");
-    const status = element("p", "status-loading", "Loading all four videos…");
-    status.setAttribute("role", "status");
-    const retry = element("button", "primary-button", "Retry loading") as HTMLButtonElement;
-    retry.hidden = true;
-    retry.addEventListener("click", () => {
-      retry.hidden = true;
-      void startExperiment(loading, retry, status);
-    });
-    loading.append(status, retry);
-    app.append(loading);
-    void startExperiment(loading, retry, status);
+    startExperiment();
     return;
   }
   const card = element("section", "start-card");
   card.append(element("p", "eyebrow", "Visual prototype"), element("h1", "", config.instructions.title));
-  card.append(element("p", "muted", "Four short trials"));
-  const label = element("label", "field-label", "Counterbalancing group");
+  card.append(element("p", "muted", `${trialCount(selectedType)} short trials`));
+  const label = element("label", "field-label", "Experiment type");
   const select = element("select") as HTMLSelectElement;
-  for (const group of groups) {
+  for (const type of studyTypes) {
     const option = document.createElement("option");
-    option.value = group;
-    option.textContent = `Group ${group}`;
-    option.selected = group === selectedGroup;
+    option.value = type;
+    option.textContent = type;
+    option.selected = type === selectedType;
     select.append(option);
   }
   label.append(select);
-  const showGroupSelect = !jatosApi || previewMode;
-  if (showGroupSelect) card.append(label);
-  select.addEventListener("change", () => { groupAssignmentMethod = "researcher_selection"; });
+  const showTypeSelect = !jatosApi || previewMode;
+  if (showTypeSelect) card.append(label);
+  select.addEventListener("change", () => { assignmentMethod = "researcher_selection"; });
   if (previewMode) {
     card.append(element("p", "preview-badge", "Researcher preview mode"));
-    const note = element("p", "muted", "The ordinary trial order is randomized when you start. Trial 4 remains last.");
+    const note = element("p", "muted", "Six baseline trials and six congruent trials are shuffled together across the first 12 trials. During/post studies end with one incongruent trial.");
     card.append(note);
-    const mapping = element("div", "preview-mapping");
-    const update = () => {
-      const group = select.value as GroupName;
-      mapping.replaceChildren(element("h3", "", `Group ${group} probe rotation`));
-      const list = element("ul", "assignment-list");
-      for (const scene of config.scenes.filter((item) => item.kind === "ordinary")) {
-        const probe = config.groups[group][scene.sceneId as keyof typeof config.groups[GroupName]] as ProbeName;
-        list.append(element("li", "", `${scene.sceneId}: ${probe} (frame ${config.probeFrames[probe]})`));
-      }
-      list.append(element("li", "", `wood_to_metal: collision or postCollision (chosen at random)`));
-      mapping.append(list);
-    };
-    select.addEventListener("change", update);
-    update();
-    card.append(mapping);
+    const probeLabel = element("label", "field-label", "Preview incongruent pair");
+    const probeSelect = element("select");
+    materialPairs.forEach((pair) => {
+      const option = element("option", "", pair);
+      option.value = pair;
+      option.selected = pair === (params.get("probe_pair") ?? materialPairs[0]);
+      probeSelect.append(option);
+    });
+    probeSelect.addEventListener("change", () => { criticalPair = probeSelect.value as MaterialPair; });
+    criticalPair = probeSelect.value as MaterialPair;
+    probeLabel.append(probeSelect);
+    card.append(probeLabel);
   }
+
   const status = element("p", "status-error", error);
   status.setAttribute("role", "alert");
   card.append(status);
   const start = element("button", "primary-button", "Start prototype") as HTMLButtonElement;
   start.disabled = Boolean(error);
   start.addEventListener("click", () => {
-    if (showGroupSelect) selectedGroup = select.value as GroupName;
-    void startExperiment(card, start, status);
+    if (showTypeSelect) selectedType = select.value as StudyType;
+    startExperiment();
   });
   card.append(start);
   app.append(card);
@@ -156,7 +186,7 @@ function showStart(error = ""): void {
 
 async function loadVideo(scene: Scene): Promise<void> {
   const url = new URL(scene.video, document.baseURI).href;
-  const entry = (manifest as VideoManifest).conditions.find((item) => item.video_path === scene.video)!;
+  const entry = videoEntryFor(scene, manifest as VideoManifest)!;
   const response = await fetch(url, { cache: "default" });
   if (!response.ok) throw new Error(`${scene.video}: HTTP ${response.status}`);
   const blob = await response.blob();
@@ -176,7 +206,7 @@ async function loadVideo(scene: Scene): Promise<void> {
       video.muted = true;
       video.onloadeddata = () => {
         if (video.videoWidth <= 0 || !Number.isFinite(video.duration) ||
-            video.duration <= config.probeFrames.postCollision / entry.fps) {
+            video.duration <= targetFor(scene, "postCollision").frame / entry.fps) {
           finish(new Error(`${scene.video}: missing video frames or too short for configured probes`));
         } else {
           finish();
@@ -186,6 +216,12 @@ async function loadVideo(scene: Scene): Promise<void> {
       video.src = objectUrl;
       video.load();
     });
+    await Promise.all((Object.keys(config.probeOffsetsMs) as ProbeName[]).map(async (probe) => {
+      const image = new Image();
+      image.src = new URL(targetFor(scene, probe).image_path, document.baseURI).href;
+      await image.decode();
+      probeImages.set(`${scene.video}:${probe}`, image);
+    }));
     videoUrls.set(scene.video, objectUrl);
   } catch (error) {
     preloadErrors.push(error instanceof Error ? error.message : String(error));
@@ -194,27 +230,35 @@ async function loadVideo(scene: Scene): Promise<void> {
   }
 }
 
-async function startExperiment(card: HTMLElement, button: HTMLButtonElement, status: HTMLElement): Promise<void> {
-  button.disabled = true;
-  status.className = "status-loading";
-  status.textContent = "Loading all four videos…";
-  try {
-    for (const scene of config.scenes) {
+function startExperiment(): void {
+  let plan: Assignment[] = [];
+  const prepare = async () => {
+    if (jatosApi && !previewMode) {
+      probeAllocation = await allocateProbe(jatosApi, selectedType);
+      criticalPair = probeAllocation?.pair ?? null;
+      assignmentMethod = selectedType === "pre" ? "study_configuration" : "jatos_balanced_quota";
+    } else if (selectedType !== "pre" && !criticalPair) {
+      criticalPair = materialPairs[Math.floor(Math.random() * materialPairs.length)];
+    }
+    if (selectedType === "pre") criticalPair = null;
+    plan = planFor(selectedType);
+    const scenes = new Map([...plan.map((a) => a.scene), config.onboarding.practice.scene].map((scene) => [scene.video, scene]));
+    for (const scene of scenes.values()) {
       if (!videoUrls.has(scene.video)) await loadVideo(scene);
     }
-  } catch (error) {
-    status.className = "status-error";
-    status.textContent = `Video loading failed: ${error instanceof Error ? error.message : String(error)}. Check the stimulus files and reload.`;
-    button.disabled = false;
-    button.hidden = false;
-    return;
-  }
-  const plan = planFor(selectedGroup);
-  const practiceScene = config.scenes.find((scene) => scene.sceneId === config.onboarding.practice.sceneId)!;
+    jsPsych.data.addProperties({
+      assignment_method: assignmentMethod,
+      incongruent_probe_pair: criticalPair,
+      quota_key: probeAllocation?.key ?? null,
+    });
+    showPreviewPlan(plan);
+  };
+  const practiceScene = config.onboarding.practice.scene;
   const practiceAssignment: Assignment = {
     scene: practiceScene,
+    phase: "practice",
     probe: config.onboarding.practice.probe,
-    frame: config.probeFrames[config.onboarding.practice.probe],
+    frame: targetFor(practiceScene, config.onboarding.practice.probe).frame,
   };
   app.replaceChildren();
   const shell = element("div", "experiment-shell");
@@ -223,20 +267,20 @@ async function startExperiment(card: HTMLElement, button: HTMLButtonElement, sta
   if (previewMode) {
     previewPanel = element("aside", "preview-panel");
     previewPanel.append(element("p", "preview-badge", "Researcher preview mode"));
-    const groupLabel = element("label", "field-label", "Counterbalancing group");
+    const typeLabel = element("label", "field-label", "Experiment type");
     const select = element("select") as HTMLSelectElement;
-    for (const group of groups) {
+    for (const type of studyTypes) {
       const option = document.createElement("option");
-      option.value = group;
-      option.textContent = `Group ${group}`;
-      option.selected = group === selectedGroup;
+      option.value = type;
+      option.textContent = type;
+      option.selected = type === selectedType;
       select.append(option);
     }
     select.addEventListener("change", () => {
-      location.search = `?preview=1&condition_group=${select.value}`;
+      location.search = `?preview=1&experiment_type=${select.value}&probe_pair=${criticalPair ?? materialPairs[0]}`;
     });
-    groupLabel.append(select);
-    previewPanel.append(groupLabel);
+    typeLabel.append(select);
+    previewPanel.append(typeLabel);
     previewPlan = element("div", "preview-plan");
     previewPanel.append(previewPlan);
     const actions = element("div", "preview-actions");
@@ -248,7 +292,7 @@ async function startExperiment(card: HTMLElement, button: HTMLButtonElement, sta
     actions.append(replay, restart);
     previewPanel.append(actions);
     shell.append(previewPanel);
-    showPreviewPlan(plan);
+    previewPlan.append(element("p", "muted", "Trial assignments will appear after consent and loading."));
     (previewPanel as HTMLElement & { replayButton?: HTMLButtonElement }).replayButton = replay;
   }
   app.append(shell);
@@ -257,10 +301,11 @@ async function startExperiment(card: HTMLElement, button: HTMLButtonElement, sta
     on_finish: () => { void finishExperiment(participant); },
   });
   jsPsych.data.addProperties({
-    data_schema_version: 1,
     run_id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    condition_group: selectedGroup,
-    group_assignment_method: groupAssignmentMethod,
+    experiment_type: selectedType,
+    assignment_method: assignmentMethod,
+    incongruent_probe_pair: criticalPair,
+    quota_key: probeAllocation?.key ?? null,
     prolific_pid: jatosApi?.urlQueryParameters.PROLIFIC_PID ?? null,
     prolific_study_id: jatosApi?.urlQueryParameters.STUDY_ID ?? null,
     prolific_session_id: jatosApi?.urlQueryParameters.SESSION_ID ?? null,
@@ -276,28 +321,34 @@ async function startExperiment(card: HTMLElement, button: HTMLButtonElement, sta
   quizAttempts = 0;
   failedQuizAttempts = 0;
   jsPsych.run([
-    { type: SessionPlugin, plan },
+    createConsentTrial(consentUrl, participant),
+    { type: PreparationPlugin, prepare },
+    { type: FullscreenGatePlugin },
+    { type: SessionPlugin, plan: () => plan },
     {
       timeline: [
         { type: IntroPlugin, on_start: () => { activeReplay = null; setReplayAvailable(false); } },
         { type: SceneTrialPlugin, assignment: practiceAssignment, index: -1, practice: true,
           on_start: () => { showPreviewPlan(plan); setReplayAvailable(true); } },
+        { type: PracticeFeedbackPlugin },
         { type: QuizPlugin, on_start: () => { activeReplay = null; setReplayAvailable(false); } },
       ],
       loop_function: () => !quizPassed,
     },
     { type: CountdownPlugin },
-    ...plan.map((assignment, index) => ({ type: SceneTrialPlugin, assignment, index, on_start: () => {
+    ...Array.from({ length: trialCount(selectedType) }, (_, index) => ({ type: SceneTrialPlugin, assignment: () => plan[index], index, on_start: () => {
       showPreviewPlan(plan, index);
       setReplayAvailable(true);
     } })),
     { type: DebriefPlugin, on_start: () => { activeReplay = null; setReplayAvailable(false); } },
     { type: SummaryPlugin },
   ] as any);
-  card.remove();
 }
 
 async function finishExperiment(participant: HTMLElement): Promise<void> {
+  fullscreenRequired = false;
+  fullscreenOverlay?.remove();
+  fullscreenOverlay = null;
   activeReplay = null;
   setReplayAvailable(false);
   for (const url of videoUrls.values()) URL.revokeObjectURL(url);
@@ -311,8 +362,9 @@ async function finishExperiment(participant: HTMLElement): Promise<void> {
     participant.replaceChildren(element("div", "complete-screen", "Submitting responses…"));
     try {
       await jatosApi!.submitResultData(payload);
-      await jatosApi!.endStudyWithoutRedirect();
-      participant.replaceChildren(element("div", "complete-screen", config.completionMessage));
+      if (probeAllocation) await completeProbe(jatosApi!, probeAllocation, selectedType);
+      // JATOS follows the End Redirect URL configured in the study properties.
+      jatosApi!.endStudy();
     } catch {
       const screen = element("div", "complete-screen");
       screen.append(element("p", "status-error", "Responses could not be submitted. Please keep this page open and retry."));
@@ -323,6 +375,37 @@ async function finishExperiment(participant: HTMLElement): Promise<void> {
     }
   };
   await submit();
+}
+
+class FullscreenGatePlugin {
+  static info = { name: "experiment-fullscreen-gate", version: "1.0.0", parameters: {}, data: {} };
+  constructor(private jsPsych: JsPsych) {}
+  trial(display: HTMLElement): void {
+    const screen = element("div", "intro-screen");
+    screen.append(element("h1", "", "Fullscreen required"));
+    screen.append(element("p", "intro-copy", "The experiment will enter fullscreen when you continue."));
+    const status = element("p", "status-error", fullscreenCapabilityError() ?? "");
+    status.setAttribute("role", "alert");
+    const button = element("button", "primary-button", "Enter fullscreen") as HTMLButtonElement;
+    button.disabled = Boolean(fullscreenCapabilityError());
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      const error = await enterRequiredFullscreen();
+      if (error) {
+        status.textContent = error;
+        button.disabled = false;
+        return;
+      }
+      fullscreenRequired = true;
+      this.jsPsych.finishTrial({
+        record_type: "fullscreen_check",
+        fullscreen_width: innerWidth,
+        fullscreen_height: innerHeight,
+      });
+    });
+    screen.append(status, button);
+    display.replaceChildren(screen);
+  }
 }
 
 class SessionPlugin {
@@ -339,12 +422,14 @@ class SessionPlugin {
         scene_id: assignment.scene.sceneId,
         stimulus_video: assignment.scene.video,
         behavioral_trial_type: assignment.scene.kind,
+        trial_phase: assignment.phase,
+        probe_offset_ms: config.probeOffsetsMs[assignment.probe],
         probe_condition: assignment.probe,
         requested_stop_frame: assignment.frame,
       })),
       preload_errors: [...preloadErrors],
       settings: {
-        probe_frames: config.probeFrames,
+        probe_offsets_ms: config.probeOffsetsMs,
         fixation_ms: config.fixationMs,
         freeze_frame_ms: config.freezeFrameMs,
         countdown_seconds: config.onboarding.countdown.seconds,
@@ -380,7 +465,7 @@ class IntroPlugin {
       const screen = element("div", "intro-screen");
       if (pageIndex > 0) screen.append(element("p", "eyebrow", `Instructions ${pageIndex} of ${pages.length - 1}`));
       screen.append(element("h1", "", page.title));
-      for (const paragraph of page.paragraphs) screen.append(element("p", "intro-copy", paragraph));
+      for (const paragraph of page.paragraphs) screen.append(element("p", "intro-copy", paragraph.replace("{trialCount}", String(trialCount(selectedType)))));
       const button = element("button", "primary-button", config.onboarding.nextButton);
       button.addEventListener("click", () => {
         pageIndex++;
@@ -391,6 +476,22 @@ class IntroPlugin {
       display.replaceChildren(screen);
     };
     showPage();
+  }
+}
+
+class PracticeFeedbackPlugin {
+  static info = { name: "practice-feedback", version: "1.0.0", parameters: {}, data: {} };
+  constructor(private jsPsych: JsPsych) {}
+  trial(display: HTMLElement): void {
+    activeReplay = null;
+    setReplayAvailable(false);
+    const screen = element("div", "intro-screen");
+    screen.append(element("h1", "", "Practice feedback"));
+    screen.append(element("p", "intro-copy", config.onboarding.practice.feedback));
+    const button = element("button", "primary-button", config.onboarding.nextButton);
+    button.addEventListener("click", () => this.jsPsych.finishTrial({ record_type: "practice_feedback" }));
+    screen.append(button);
+    display.replaceChildren(screen);
   }
 }
 
@@ -486,6 +587,28 @@ class DebriefPlugin {
     const shownAt = performance.now();
     const screen = element("div", "debrief-screen");
     screen.append(element("h1", "", config.onboarding.debrief.title));
+    const requiredAnswers: Array<"yes" | "no" | null> = config.onboarding.debrief.requiredQuestions.map(() => null);
+    const finish = element("button", "primary-button", config.onboarding.debrief.finishButton);
+    finish.disabled = true;
+    config.onboarding.debrief.requiredQuestions.forEach((question, questionIndex) => {
+      const group = element("fieldset", "quiz-question");
+      group.append(element("legend", "", question.prompt));
+      if ("detail" in question) group.append(element("p", "debrief-detail", question.detail));
+      for (const [value, labelText] of [["yes", config.onboarding.debrief.yesLabel], ["no", config.onboarding.debrief.noLabel]] as const) {
+        const label = element("label", "quiz-option", labelText);
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = `debrief-${question.id}`;
+        radio.value = value;
+        radio.addEventListener("change", () => {
+          requiredAnswers[questionIndex] = value;
+          finish.disabled = requiredAnswers.some((answer) => answer === null);
+        });
+        label.prepend(radio);
+        group.append(label);
+      }
+      screen.append(group);
+    });
     screen.append(element("p", "", config.onboarding.debrief.optionalNote));
     const answers: HTMLTextAreaElement[] = [];
     for (const prompt of [config.onboarding.debrief.strategyQuestion, config.onboarding.debrief.commentsQuestion]) {
@@ -497,13 +620,18 @@ class DebriefPlugin {
       label.append(answer);
       screen.append(label);
     }
-    const finish = element("button", "primary-button", config.onboarding.debrief.finishButton);
     finish.addEventListener("click", () => {
+      if (requiredAnswers.some((answer) => answer === null)) return;
       const strategies = answers[0].value.trim();
       const additionalComments = answers[1].value.trim();
       screen.replaceChildren();
       this.jsPsych.finishTrial({
         record_type: "debrief",
+        required_feedback: config.onboarding.debrief.requiredQuestions.map((question, index) => ({
+          id: question.id,
+          question: question.prompt,
+          answer: requiredAnswers[index],
+        })),
         strategies,
         additional_comments: additionalComments,
         response_time_ms: performance.now() - shownAt,
@@ -544,16 +672,11 @@ class SceneTrialPlugin {
   };
   constructor(private jsPsych: JsPsych) {}
   trial(display: HTMLElement, trial: { assignment: Assignment; index: number; practice?: boolean }): void {
-    const trialLabel = trial.practice ? config.onboarding.practice.label : `Trial ${trial.index + 1} of 4`;
+    const trialLabel = trial.practice ? config.onboarding.practice.label : `Trial ${trial.index + 1} of ${trialCount(selectedType)}`;
     const trialStartedAt = performance.now();
     const trialStartedIso = new Date().toISOString();
     const playbackErrors: Array<{ attempt: number; elapsed_ms: number; message: string; media_error_code: number | null }> = [];
     let playbackAttempts = 0;
-    let playbackStartedAt: number | null = null;
-    let cutAtPerformance: number | null = null;
-    let stopObservation: StopObservation | null = null;
-    let lastVisibleFrame = 0;
-    let lastVisibleTimeSeconds = 0;
     let massFirstMoveRt: number | null = null;
     let confidenceFirstMoveRt: number | null = null;
     let generation = 0;
@@ -610,7 +733,7 @@ class SceneTrialPlugin {
       screen.append(continueButton);
       continueButton.addEventListener("click", () => {
         const values = control.getResponse();
-        const entry = (manifest as VideoManifest).conditions.find((item) => item.video_path === trial.assignment.scene.video)!;
+        const entry = videoEntryFor(trial.assignment.scene, manifest as VideoManifest)!;
         activeReplay = null;
         setReplayAvailable(false);
         this.jsPsych.finishTrial({
@@ -620,6 +743,8 @@ class SceneTrialPlugin {
           is_practice: Boolean(trial.practice),
           behavioral_trial_type: trial.practice ? "practice" : trial.assignment.scene.kind,
           scene_kind: trial.assignment.scene.kind,
+          trial_phase: trial.assignment.phase,
+          probe_offset_ms: config.probeOffsetsMs[trial.assignment.probe],
           scene_id: trial.assignment.scene.sceneId,
           stimulus_video: trial.assignment.scene.video,
           probe_condition: trial.assignment.probe,
@@ -628,17 +753,9 @@ class SceneTrialPlugin {
           video_condition_id: entry.condition_id,
           requested_stop_frame: trial.assignment.frame,
           requested_stop_time_s: trial.assignment.frame / entry.fps,
-          actual_stop_frame: stopObservation?.actualFrame ?? null,
-          actual_stop_time_s: stopObservation?.actualTimeSeconds ?? null,
-          last_visible_frame: stopObservation?.lastVisibleFrame ?? null,
-          last_visible_time_s: stopObservation?.lastVisibleTimeSeconds ?? null,
-          stop_method: stopObservation?.method ?? null,
           playback_attempts: playbackAttempts,
           playback_error_count: playbackErrors.length,
           playback_errors: playbackErrors,
-          playback_started_rt_ms: playbackStartedAt === null ? null : playbackStartedAt - trialStartedAt,
-          video_cut_rt_ms: cutAtPerformance === null ? null : cutAtPerformance - trialStartedAt,
-          freeze_hold_actual_ms: cutAtPerformance === null ? null : responseShownAt - cutAtPerformance,
           response_screen_rt_ms: responseShownAt - trialStartedAt,
           mass_first_move_rt_ms: massFirstMoveRt,
           confidence_first_move_rt_ms: confidenceFirstMoveRt,
@@ -662,8 +779,6 @@ class SceneTrialPlugin {
       screen.append(element("p", "eyebrow", trialLabel));
       const stage = element("div", "video-stage");
       const canvas = element("canvas") as HTMLCanvasElement;
-      canvas.width = 960;
-      canvas.height = 540;
       canvas.setAttribute("aria-label", "Two objects interacting on a ramp and table");
       video = document.createElement("video");
       const playingVideo = video;
@@ -673,21 +788,30 @@ class SceneTrialPlugin {
       playingVideo.controls = false;
       playingVideo.preload = "auto";
       playingVideo.src = source;
-      stage.append(playingVideo, canvas);
+      const paused = element("div", "pause-indicator");
+      paused.hidden = true;
+      paused.setAttribute("role", "status");
+      const pauseIcon = element("span", "pause-icon");
+      pauseIcon.setAttribute("aria-hidden", "true");
+      paused.append(pauseIcon, element("span", "", "Paused"));
+      stage.append(playingVideo, canvas, paused);
       screen.append(stage);
       display.replaceChildren(screen);
+      const stageWidth = stage.getBoundingClientRect().width || 960;
+      const pixelRatio = Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
+      canvas.width = Math.max(1, Math.round(stageWidth * pixelRatio));
+      canvas.height = Math.max(1, Math.round(canvas.width * 9 / 16));
       const context = canvas.getContext("2d");
       if (!context) { fail("Canvas is unavailable in this browser."); return; }
-      const entry = (manifest as VideoManifest).conditions.find((item) => item.video_path === trial.assignment.scene.video)!;
+      const entry = videoEntryFor(trial.assignment.scene, manifest as VideoManifest)!;
       const cutAt = trial.assignment.frame / entry.fps;
-      const cut = (method: StopObservation["method"], actualFrame: number, actualTimeSeconds: number) => {
+      const cut = () => {
         if (run !== generation) return;
-        cutAtPerformance = performance.now();
-        stopObservation = { method, actualFrame, actualTimeSeconds, lastVisibleFrame, lastVisibleTimeSeconds };
-        // The source video sits behind an opaque canvas, so no frame after the
-        // cut can appear even if the browser delivers a callback late. Remove
-        // the video now; the canvas retains its last drawn frame for the hold.
+        const still = probeImages.get(`${trial.assignment.scene.video}:${trial.assignment.probe}`);
+        if (!still) { fail("The probe image is unavailable. Rebuild the stimuli and reload."); return; }
+        context.drawImage(still, 0, 0, canvas.width, canvas.height);
         clean();
+        paused.hidden = false;
         timer = window.setTimeout(() => {
           if (run === generation) response();
         }, config.freezeFrameMs);
@@ -695,29 +819,28 @@ class SceneTrialPlugin {
       const fallback = () => {
         if (run !== generation || !video) return;
         if (playingVideo.currentTime >= cutAt) {
-          cut("time_fallback", Math.round(playingVideo.currentTime * entry.fps), playingVideo.currentTime);
+          cut();
           return;
         }
         context.drawImage(playingVideo, 0, 0, canvas.width, canvas.height);
-        lastVisibleTimeSeconds = playingVideo.currentTime;
-        lastVisibleFrame = Math.round(lastVisibleTimeSeconds * entry.fps);
         animation = requestAnimationFrame(fallback);
       };
       const frames = (_now: number, metadata: VideoFrameCallbackMetadata) => {
         if (run !== generation || !video) return;
         receivedFrame = true;
         const frame = Math.round(metadata.mediaTime * entry.fps);
-        if (frame >= trial.assignment.frame) { cut("video_frame_callback", frame, metadata.mediaTime); return; }
+        if (frame >= trial.assignment.frame) { cut(); return; }
         context.drawImage(playingVideo, 0, 0, canvas.width, canvas.height);
-        lastVisibleFrame = frame;
-        lastVisibleTimeSeconds = metadata.mediaTime;
         frameCallback = playingVideo.requestVideoFrameCallback(frames);
       };
       playingVideo.onerror = () => fail(`Playback failed for ${trial.assignment.scene.video}.`, playingVideo.error?.code ?? null);
       playingVideo.onended = () => fail(`Playback ended before probe frame ${trial.assignment.frame}.`);
-      playingVideo.onplaying = () => { playbackStartedAt = performance.now(); };
       const beginPlayback = () => {
         if (run !== generation || video !== playingVideo) return;
+        if (!document.fullscreenElement) {
+          timer = window.setTimeout(beginPlayback, 100);
+          return;
+        }
         playingVideo.currentTime = 0;
         if ("requestVideoFrameCallback" in playingVideo) {
           frameCallback = playingVideo.requestVideoFrameCallback(frames);
@@ -739,12 +862,9 @@ class SceneTrialPlugin {
       };
       playingVideo.onloadeddata = () => {
         if (run !== generation) return;
-        // Show frame zero on the same canvas used for playback, then start the
-        // video from zero after the configured freeze-frame interval.
+        // The MP4 contains the entire acclimation intro; start immediately.
         context.drawImage(playingVideo, 0, 0, canvas.width, canvas.height);
-        lastVisibleFrame = 0;
-        lastVisibleTimeSeconds = 0;
-        timer = window.setTimeout(beginPlayback, config.freezeFrameMs);
+        beginPlayback();
       };
       playingVideo.load();
     };
@@ -753,11 +873,6 @@ class SceneTrialPlugin {
       playbackAttempts++;
       receivedFrame = false;
       clean();
-      playbackStartedAt = null;
-      cutAtPerformance = null;
-      stopObservation = null;
-      lastVisibleFrame = 0;
-      lastVisibleTimeSeconds = 0;
       massFirstMoveRt = null;
       confidenceFirstMoveRt = null;
       const run = generation;
@@ -777,23 +892,26 @@ function bootstrap(api: JatosApi | null): void {
   jatosApi = api;
   if (api) {
     previewMode = api.urlQueryParameters.preview === "1" || previewMode;
-    requestedGroup = api.urlQueryParameters.condition_group ?? requestedGroup;
+    requestedType = api.urlQueryParameters.experiment_type ?? requestedType;
   }
   const startupErrors = [...errors];
-  if (requestedGroup !== null && !groups.includes(requestedGroup as GroupName)) {
-    startupErrors.push("condition_group must be 1, 2, or 3.");
-  } else if (requestedGroup !== null) {
-    selectedGroup = requestedGroup as GroupName;
-    groupAssignmentMethod = "url_override";
-  } else if (api && !previewMode) {
-    selectedGroup = groups[Math.floor(Math.random() * groups.length)];
-    groupAssignmentMethod = "random";
+  if (api && !previewMode) {
+    const configuredType = api.studyInput?.experiment_type;
+    if (!studyTypes.includes(configuredType as StudyType)) {
+      startupErrors.push('Set experiment_type to pre, during, or post in the JATOS study JSON input.');
+    } else {
+      selectedType = configuredType as StudyType;
+      assignmentMethod = "study_configuration";
+    }
+  } else if (requestedType !== null) {
+    if (!studyTypes.includes(requestedType as StudyType)) startupErrors.push("experiment_type must be pre, during, or post.");
+    else { selectedType = requestedType as StudyType; assignmentMethod = "url_override"; }
   }
   showStart(startupErrors.join(" "));
 }
 
 // JATOS must initialize before its URL parameters or submission API are used.
 // JATOS participants preload automatically; local and preview runs use the
-// researcher start button to choose a group before running the timeline.
+// researcher start button to choose an experiment type before running the timeline.
 if (window.jatos) window.jatos.onLoad(() => bootstrap(window.jatos!));
 else bootstrap(null);

@@ -1,108 +1,160 @@
 # Relative mass experiment
 
-This TypeScript/Vite/jsPsych 8 experiment uses the existing MP4s in
-`../stimuli/generated/videos/`. Those files and `video_manifest.json` must be
-present locally. From this `experiment/` directory, with Node.js and npm:
+This TypeScript/Vite/jsPsych app uses MP4s and exact probe PNGs from
+`../stimuli/generated/videos/`. Rebuild both the 12 main stimuli and the separate
+practice stimulus before building the app. Old manifests are deliberately rejected:
+they lack the baseline probe and use different pre/during offsets.
 
 ```sh
+# Repository root; run these yourself when ready to regenerate stimuli.
+python stimuli/build_stimuli.py --all
+python stimuli/build_stimuli.py --practice
+cd experiment
 npm install
-npm run dev       # open the URL Vite prints
-npm run build     # checks configuration and creates static dist/
-npm run preview   # serves dist/ locally
+npm test
+npm run build
+npm run dev
 ```
 
-From the repository root, first run `cd experiment`. Open `/?preview=1` for
-researcher controls and assignments. Use `/?condition_group=1`, `2`, or `3` to
-preselect a group; combine them as `/?preview=1&condition_group=2`. The start
-screen has a group selector in local and preview runs. In an ordinary JATOS
-run, one group is assigned at random and the selector is hidden. A
-`condition_group` parameter on the JATOS launch URL overrides that assignment
-for testing. This is independent random assignment, not a quota-balanced
-allocation across participants. JATOS participants see a brief video-loading
-message and then the welcome page automatically, with no Start button.
-Preview mode shows the shuffled trial order,
-lets you replay the current trial, switch groups, and restart. Normal mode hides
-those controls.
+Local preview: `/?preview=1&experiment_type=during` (also `pre` or `post`).
+The start screen selects the study type and, in preview mode, the incongruent
+pair. `probe_pair=brick_to_metal` can preselect a preview pair. Preview displays
+the shuffled plan, replay and restart controls. Local/static runs keep data in
+memory; use JATOS for saved results. Serve over HTTP(S), not `file://`.
 
-After loading, participants see a welcome page and short task instructions,
-followed by a practice trial using one ordinary video. The practice trial
-pauses after the collision and uses the same mass and confidence sliders as the
-main trials. Two multiple-choice questions follow. Both must be correct to
-continue; otherwise the welcome, instructions, and practice repeat. The four
-main trials then run as before. An optional two-question debrief appears before
-the completion message.
-After both quiz answers are correct, a five-second countdown leads into the
-first trial's fixation screen. On each response screen, participants must move
-both the mass and confidence sliders before Continue is enabled.
+## Trial design
 
-Edit **[`app/experiment.config.ts`](app/experiment.config.ts)** for video names,
-scene IDs, ordinary/violation status, the three group rotations, probe frames,
-the final trial's random collision/post-collision choices, instructions, response
-wording, slider values, fixation duration, freeze-frame duration
-(`freezeFrameMs`, in milliseconds), and completion text. Set `freezeFrameMs`
-to `0` to show the slider immediately. Frames are
-zero-based MP4 frames. In the current metadata, first contact is frame 79 at
-60 fps; the current pre/collision/post cuts are frames 67/87/100. The current
-videos have no start hold. If you rebuild them with holds, update the probe
-frames by the manifest's trajectory-frame offset. `npm run build` checks that
-configured video files exist and that probe frames fit their manifest entries.
-The `onboarding` section of the same file contains the welcome and instruction
-pages, practice scene and probe, quiz questions and correct answer indexes, and
-countdown duration (`countdown.seconds`), and optional debrief prompts. The practice scene may reuse an ordinary video; it
-does not change the four main-trial assignments.
+Each participant belongs to one study type for the entire experiment. The six
+baseline trials and six assigned-timing congruent trials are shuffled together
+across the first 12 trials. Each trial type includes all six directed
+distinct-material pairs once: wood→brick, brick→wood, wood→metal, metal→wood,
+brick→metal, metal→brick. The incongruent probe remains last for during/post.
 
-The mass slider's negative positions mean the ramp object is heavier; positive
-positions mean the table object is heavier. Zero means equal mass. The separate
-confidence slider runs from 0% to 100%, starting at 50%. At 0%, its solid range
-bar spans the full mass scale; at 100%, it collapses to the mass estimate. The
-response labels are editable in `app/experiment.config.ts`.
+| Phase | Trials | Stimuli | Freeze relative to first contact |
+|---|---:|---|---|
+| Baseline, every study | Mixed within 1–12 | Six congruent videos | −1000 ms |
+| Assigned study timing | Mixed within 1–12 | Six congruent videos | pre: −200 ms; during: +200 ms; post: +1000 ms |
+| Incongruent probe | 13, during/post only | One of six incongruent videos | Same timing as the assigned study phase |
 
-The app fetches and decodes all four required videos before the instructions.
-Playback uses `requestVideoFrameCallback()` and the manifest FPS to cut at the
-configured frame; older browsers use `currentTime` with an animation-frame
-check. A canvas masks the source video, so late callbacks cannot reveal later
-frames. After the cut, the video element is removed and the canvas holds the
-last displayed frame for `freezeFrameMs` before the slider appears. A busy
-browser may cut one displayed frame early.
+The pre study ends after 12 main trials. During/post have 13. Practice is separate.
+The old within-participant timing rotations and `condition_group` are removed.
+The filename suffix `violation` still identifies an incongruent video.
 
-## JATOS setup
+Participants first read the supplied consent form and check its agreement box
+before selecting **Begin**. The form is loaded with `@jspsych/plugin-external-html`
+from `assets/consent.html`; Vite includes it in the built app automatically. The
+copy preserves the supplied HTML text, agreement checkbox, Begin button, and
+print button. Edit that repository copy for future consent-form updates.
 
-The build contains `index.html`, the bundled app, fonts, and MP4s. JATOS serves
-`jatos.js` automatically, so that file is intentionally absent from `dist/`.
-In your local JATOS GUI, create a study and copy the **contents** of
-`experiment/dist/` into that study's assets directory under
-`/Users/aryanagarwal/Downloads/jatos/study_assets_root/`. Add one component
-whose HTML file is `index.html`, then run that component through JATOS. Do not
-copy files into `study_assets_root/` before creating the study: JATOS creates a
-separate assets directory for each study. The downloaded JATOS installation is
-not modified by this repository.
+After consent, the app allocates the incongruent probe (when applicable), preloads
+videos, and requests fullscreen. Participants then read instructions and complete the equal-mass gray
+practice trial and see: “The two blocks had equal mass. You will not receive any
+more feedback during the main experiment.” They then answer two comprehension
+questions. Failed quizzes repeat instructions/practice. A **3-second** countdown
+leads into the main trials. Both response sliders must be moved before Continue.
+The debrief contains three required yes/no questions and two optional written
+questions. No main-trial correctness feedback is given.
 
-JATOS must initialize before the experiment starts. At completion, the app
-submits `jsPsych.data.get().json()` and ends the study without redirecting away
-from the completion message. If submission fails, the page offers a retry and
-keeps the data in memory. The JATOS launch URL may include `PROLIFIC_PID`,
-`STUDY_ID`, and `SESSION_ID`; missing values are recorded as `null`. No Prolific
-redirect is implemented.
+`app/experiment.config.ts` contains wording, scene selection, the four offsets,
+fixation (2000 ms), freeze duration (`freezeFrameMs`, 1500 ms), and sliders.
+The mass scale permits 10× in either direction; zero is equal mass. Confidence
+ranges from 0–100%. The video includes an 800 ms empty scene and 200 ms stationary
+objects. Canvas playback switches to the exact decoded probe still at the cut.
+A **pause icon and “Paused” badge** appear in the upper right only during the
+freeze, without covering the blocks. The response screen follows the freeze.
+Exiting fullscreen blocks progression and pauses active video playback.
 
-## Recorded data
+## JATOS and Prolific: three studies, balanced probes
 
-Each JATOS result is a JSON array of jsPsych records. Every record includes a
-schema version, run ID, counterbalancing group, Prolific IDs, JATOS IDs, and
-preview status. The `session` record contains the randomized trial order,
-timing and slider settings, preload errors, and browser information.
-`scene_trial` records contain the scene, video, `behavioral_trial_type`
-(ordinary/violation/practice), probe, requested frame and time, observed cut frame and time, last canvas
-frame shown, stop method, playback attempts and errors, mass estimate, mass
-ratio, confidence, and response timings. `comprehension_quiz` records contain
-each attempt and answer; `debrief` contains the optional text responses; the
-`summary` contains the number of quiz attempts and instruction loops. Time
-durations are in milliseconds, video times in seconds, and timestamps are UTC.
-On a time-based fallback, frame numbers are estimates from the manifest FPS.
-The `group_assignment_method` field identifies a random assignment, URL
-override, or researcher selection.
+Create three JATOS studies using the same build. Set each study's **JSON input**
+(as an object, not a string) to one of:
 
-Outside JATOS, including `npm run dev`, `npm run preview`, and a static host,
-the experiment runs but does not save or submit data. Data remains in memory
-until the page is refreshed. A static host is suitable for instructor review;
-use JATOS to record results. Serve the build over HTTP(S), since opening
-`index.html` directly as `file://` is unsupported.
+```json
+{"experiment_type":"pre"}
+```
+
+```json
+{"experiment_type":"during"}
+```
+
+```json
+{"experiment_type":"post"}
+```
+
+In ordinary JATOS runs this setting is required and authoritative. URL parameters
+cannot switch a participant's type. Local/preview selections do not consume quotas.
+Copy the contents of `dist/` into each study's JATOS-created assets directory and
+create a component whose HTML file is `index.html`. JATOS supplies `jatos.js`.
+
+For the **240 incongruent-probe participants**, recruit **120 in the during study
+and 120 in the post study**, using one production batch per study. This is two
+Prolific studies, not twelve. The pre study needs an additional, separately chosen
+sample size because it contributes no incongruent probes. Prolific launch URLs may
+include `PROLIFIC_PID`, `STUDY_ID`, and `SESSION_ID`; these are recorded. In each
+JATOS study's **Study Properties**, set **End Redirect URL** to the matching
+Prolific completion URL (which includes its completion code). After responses
+and probe quotas are saved, the app calls `jatos.endStudy()` to follow that
+redirect. If the field is left empty, JATOS displays its default end page.
+
+The app automatically creates a shared Batch Session entry named
+`galileo_probe_quotas_v1_during` or `galileo_probe_quotas_v1_post`. For each arrival,
+it reserves a pair among those with the fewest completed-plus-reserved places,
+breaking ties randomly. Each pair has a cap of **20**. Thus every block of six
+allocations covers all six pairs, and 120 assignments give exactly 20 per pair.
+The key and participant reservation persist on the JATOS server. Reloads/retries
+reuse the assignment. JATOS versioning rejects conflicting simultaneous writes;
+the app re-reads and recomputes before retrying. It never falls back to unbalanced
+random allocation on a quota/network error. This uses the documented
+[JATOS Batch Session/versioning API](https://www.jatos.org/jatos.js-Reference.html#jatosbatchsessionversioning).
+
+A reservation becomes `completed` after results are submitted successfully, before
+the study ends. Submission/quota failures offer a retry with data retained in
+memory. A full quota prevents further allocations. The relevant namespace has this
+shape (the app initializes it automatically):
+
+```json
+{
+  "type": "during",
+  "target": 20,
+  "reservations": {
+    "participant_EXAMPLE_PID": {
+      "pair": "wood_to_brick",
+      "status": "reserved",
+      "reservedAt": "2026-10-22T12:00:00.000Z"
+    }
+  }
+}
+```
+
+**Attrition/top-ups:** 240 starts cannot guarantee 240 completed responses. In
+JATOS's Batch Session editor, inspect `reservations`; count `completed` entries
+per pair. After confirming that an abandoned run cannot resume and has no usable
+response, change only that participant's `status` from `reserved` to `released`.
+Recruit replacement places in the same study/batch; the allocator fills those
+vacancies. An excluded completed record can likewise be released after review.
+Do not delete/reset the namespace during recruitment. Reservations do not expire
+automatically, preventing late participants from overrunning reallocated slots.
+Make these edits between recruitment waves, after active runs have finished.
+Use a separate batch for testing so test reservations do not consume live places.
+
+## Recorded data and checks
+
+Every result record includes `experiment_type`, `assignment_method`, incongruent
+pair/quota key, run ID, Prolific IDs, JATOS IDs, and preview status. `session`
+contains the actual trial order and settings. Each `scene_trial` includes
+`trial_phase` (baseline/congruent/incongruent/practice), scene and condition,
+`probe_condition`, `probe_offset_ms`, exact requested frame/time, response values,
+confidence, response timings and playback attempts/errors. The `consent` record
+includes the loaded form URL, response time (`rt`), `consented: true`, and
+`consented_at`. Consent is shown once, before preparation/fullscreen, and is
+outside the quiz retry loop. It is submitted with the other records at completion.
+Quiz, practice-feedback,
+debrief and summary records are also saved. Durations are milliseconds, video times
+are seconds, and timestamps are UTC.
+
+`npm test` checks consent gating and setup retry/progression in a DOM test,
+plus all study plans, stale probe metadata, quotas, idempotence and
+simulated concurrent JATOS arrivals/completions. `npm run build` also checks all
+required video/probe assets. Rebuild stimuli before expecting that production
+check to pass. Fullscreen/playback behavior should be checked in your deployed
+JATOS browser before recruitment.

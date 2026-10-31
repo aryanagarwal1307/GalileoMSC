@@ -40,6 +40,16 @@ select { max-width: 210px; padding: 9px 12px; border: 1px solid #acb9c7; border-
 .experiment-shell { max-width: 1370px; margin: 0 auto; display: flex; align-items: flex-start; gap: 24px; padding: 34px 28px; }
 .participant-surface { flex: 1; min-width: 0; background: white; border: 1px solid #dce2e8; border-radius: 12px; min-height: 680px; display: grid; place-items: center; }
 .participant-surface .jspsych-content-wrapper, .participant-surface #jspsych-content { width: 100%; max-width: none; }
+.consent-active #container-consent { max-width: 840px; margin: auto; padding: 38px 44px; text-align: left; line-height: 1.65; }
+.consent-active h1, .consent-active h2, .consent-active h4 { text-align: center; }
+.consent-active .legal p { margin: 20px 0; }
+.consent-active button { margin: 10px 0; }
+.consent-active input[type="checkbox"] { margin-right: 8px; accent-color: #000; }
+.consent-active a { overflow-wrap: anywhere; }
+@media print {
+  .consent-active button, .consent-active input, .preview-panel { display: none; }
+  .consent-active #container-consent { padding: 0; max-width: none; }
+}
 .intro-screen, .response-screen, .complete-screen { max-width: 760px; margin: auto; padding: 46px; text-align: left; }
 .intro-screen > h1, .intro-screen > .eyebrow, .response-screen > h2, .response-screen > .eyebrow, .quiz-screen > h1, .debrief-screen > h1 { text-align: center; }
 .intro-copy { font-size: 1.1rem; line-height: 1.55; margin: 24px auto; }
@@ -52,6 +62,7 @@ select { max-width: 210px; padding: 9px 12px; border: 1px solid #acb9c7; border-
 .quiz-option { display: flex; align-items: baseline; gap: 10px; margin: 11px 0; cursor: pointer; }
 .quiz-option input { accent-color: #000; }
 .debrief-question { display: grid; gap: 10px; margin: 24px 0; font-weight: 700; }
+.debrief-detail { margin: 10px 0; line-height: 1.5; }
 .debrief-question textarea { width: 100%; padding: 12px; border: 1px solid #acb9c7; border-radius: 7px; resize: vertical; font-weight: 400; }
 .fixation-screen { min-height: 640px; display: grid; grid-template-rows: auto 1fr; padding: 30px; }
 .fixation-mark { align-self: center; font-size: 3rem; font-weight: 300; color: #405469; }
@@ -59,6 +70,12 @@ select { max-width: 210px; padding: 9px 12px; border: 1px solid #acb9c7; border-
 .video-stage { position: relative; width: min(100%, 960px); aspect-ratio: 16 / 9; margin: 0 auto; background: #d4d7db; overflow: hidden; }
 .video-stage canvas { position: relative; z-index: 1; display: block; width: 100%; height: 100%; background: #d4d7db; }
 .video-source { position: absolute; inset: 0; width: 100%; height: 100%; opacity: .001; pointer-events: none; }
+.pause-indicator { position: absolute; z-index: 2; top: 16px; right: 16px; display: flex; align-items: center; gap: 9px; padding: 10px 14px; border-radius: 8px; background: #171717e8; pointer-events: none; }
+.pause-indicator[hidden] { display: none; }
+#app .pause-indicator, #app .pause-indicator * { color: #fff; }
+.pause-icon { display: inline-block; width: 16px; height: 20px; border-left: 5px solid white; border-right: 5px solid white; }
+.fullscreen-overlay { position: fixed; inset: 0; z-index: 9999; display: grid; place-items: center; padding: 24px; background: #f3f5f7; }
+.fullscreen-overlay .start-card { width: min(100%, 580px); margin: 0; }
 .response-screen { width: min(100%, 780px); }
 .response-screen h2 { margin-bottom: 18px; }
 .response-screen .primary-button { margin-top: 26px; }
@@ -100,3 +117,5 @@ select { max-width: 210px; padding: 9px 12px; border: 1px solid #acb9c7; border-
 .complete-screen { font-size: 1.35rem; line-height: 1.5; }
 @media (max-width: 1050px) { .experiment-shell { flex-direction: column; } .preview-panel { width: 100%; order: -1; } .participant-surface { width: 100%; min-height: 600px; } }
 @media (max-width: 650px) { .experiment-shell { padding: 12px; } .start-card { margin: 12px; padding: 26px; } .participant-surface { min-height: 520px; } .intro-screen, .response-screen, .quiz-screen, .debrief-screen, .countdown-screen { padding: 26px; } .video-screen { padding: 10px; } }
+
+@media (max-width: 650px) { .consent-active #container-consent { padding: 24px; } }
