@@ -50,7 +50,11 @@ After consent, the app allocates the incongruent probe (when applicable), preloa
 videos, and requests fullscreen. Participants then read instructions and complete the equal-mass gray
 practice trial and see: “The two blocks had equal mass. You will not receive any
 more feedback during the main experiment.” They then answer two comprehension
-questions. Failed quizzes repeat instructions/practice. A **3-second** countdown
+questions. Failed quizzes repeat instructions/practice. After passing the quiz,
+a material introduction page shows
+the production Wood, Brick, and Metal blocks, in that order, at the same display
+scale as the scenes. Its title, paragraphs, labels, and button are editable in
+`onboarding.materials` in `app/experiment.config.ts`. A **3-second** countdown
 leads into the main trials. Both response sliders must be moved before Continue.
 The debrief contains three required yes/no questions and two optional written
 questions. No main-trial correctness feedback is given.

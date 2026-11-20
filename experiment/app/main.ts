@@ -12,6 +12,9 @@ import { createMassResponseControl } from "./slider";
 import { createConsentTrial } from "./consent";
 import { PreparationPlugin } from "./preparation";
 import consentUrl from "../assets/consent.html?url";
+import woodBlockUrl from "../assets/materials/wood.png";
+import brickBlockUrl from "../assets/materials/brick.png";
+import metalBlockUrl from "../assets/materials/metal.png";
 import type { JatosApi } from "./jatos";
 import manifest from "../../stimuli/generated/videos/video_manifest.json";
 import "./style.css";
@@ -246,6 +249,11 @@ function startExperiment(): void {
     for (const scene of scenes.values()) {
       if (!videoUrls.has(scene.video)) await loadVideo(scene);
     }
+    await Promise.all([woodBlockUrl, brickBlockUrl, metalBlockUrl].map(async (url) => {
+      const image = new Image();
+      image.src = url;
+      await image.decode();
+    }));
     jsPsych.data.addProperties({
       assignment_method: assignmentMethod,
       incongruent_probe_pair: criticalPair,
@@ -335,6 +343,7 @@ function startExperiment(): void {
       ],
       loop_function: () => !quizPassed,
     },
+    { type: MaterialsPlugin },
     { type: CountdownPlugin },
     ...Array.from({ length: trialCount(selectedType) }, (_, index) => ({ type: SceneTrialPlugin, assignment: () => plan[index], index, on_start: () => {
       showPreviewPlan(plan, index);
@@ -491,6 +500,38 @@ class PracticeFeedbackPlugin {
     const button = element("button", "primary-button", config.onboarding.nextButton);
     button.addEventListener("click", () => this.jsPsych.finishTrial({ record_type: "practice_feedback" }));
     screen.append(button);
+    display.replaceChildren(screen);
+  }
+}
+
+class MaterialsPlugin {
+  static info = { name: "material-familiarization", version: "1.0.0", parameters: {}, data: {} };
+  constructor(private jsPsych: JsPsych) {}
+  trial(display: HTMLElement): void {
+    const shownAt = performance.now();
+    const copy = config.onboarding.materials;
+    const screen = element("div", "materials-screen");
+    const intro = element("div", "intro-screen");
+    intro.append(element("h1", "", copy.title));
+    for (const paragraph of copy.paragraphs) intro.append(element("p", "intro-copy", paragraph));
+    const gallery = element("div", "materials-gallery");
+    for (const [url, label] of [[woodBlockUrl, copy.woodLabel], [brickBlockUrl, copy.brickLabel], [metalBlockUrl, copy.metalLabel]]) {
+      const figure = element("figure", "material-block");
+      const image = element("img");
+      image.src = url;
+      image.alt = label;
+      image.width = image.height = 384;
+      figure.append(image, element("figcaption", "", label));
+      gallery.append(figure);
+    }
+    const button = element("button", "primary-button", copy.continueButton);
+    button.addEventListener("click", () => this.jsPsych.finishTrial({
+      record_type: "material_familiarization",
+      instruction_round: quizAttempts,
+      materials: [copy.woodLabel, copy.brickLabel, copy.metalLabel],
+      response_time_ms: performance.now() - shownAt,
+    }));
+    screen.append(intro, gallery, button);
     display.replaceChildren(screen);
   }
 }

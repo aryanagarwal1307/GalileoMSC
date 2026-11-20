@@ -67,6 +67,14 @@ select { max-width: 210px; padding: 9px 12px; border: 1px solid #acb9c7; border-
 .fixation-screen { min-height: 640px; display: grid; grid-template-rows: auto 1fr; padding: 30px; }
 .fixation-mark { align-self: center; font-size: 3rem; font-weight: 300; color: #405469; }
 .video-screen { padding: 26px; }
+.materials-screen { width: 100%; padding: 26px; }
+.materials-screen .intro-screen { padding: 20px 20px 0; }
+.materials-gallery { width: min(100%, 960px); margin: 0 auto; display: flex; }
+.material-block { width: calc(100% / 3); margin: 0; text-align: center; }
+/* 384px crops of 1920px renders: 60% of one third = 20% of the scene width. */
+.material-block img { display: block; width: 60%; height: auto; margin: 0 auto; }
+.material-block figcaption { margin-top: 8px; font-size: 1.1rem; font-weight: 600; }
+.materials-screen > .primary-button { display: block; margin: 38px auto 20px; }
 .video-stage { position: relative; width: min(100%, 960px); aspect-ratio: 16 / 9; margin: 0 auto; background: #d4d7db; overflow: hidden; }
 .video-stage canvas { position: relative; z-index: 1; display: block; width: 100%; height: 100%; background: #d4d7db; }
 .video-source { position: absolute; inset: 0; width: 100%; height: 100%; opacity: .001; pointer-events: none; }
@@ -119,3 +127,4 @@ select { max-width: 210px; padding: 9px 12px; border: 1px solid #acb9c7; border-
 @media (max-width: 650px) { .experiment-shell { padding: 12px; } .start-card { margin: 12px; padding: 26px; } .participant-surface { min-height: 520px; } .intro-screen, .response-screen, .quiz-screen, .debrief-screen, .countdown-screen { padding: 26px; } .video-screen { padding: 10px; } }
 
 @media (max-width: 650px) { .consent-active #container-consent { padding: 24px; } }
+@media (max-width: 650px) { .materials-screen { padding: 10px; } }

@@ -80,6 +80,17 @@ export const experimentConfig = {
       label: "Practice",
       feedback: "The two blocks had equal mass. You will not receive any more feedback during the main experiment.",
     },
+    materials: {
+      title: "The blocks in the experiment",
+      paragraphs: [
+        "The practice blocks were plain gray. In the main experiment, you will see blocks made of the three materials shown below.",
+        "Take a moment to look at each block carefully before continuing.",
+      ],
+      woodLabel: "Wood",
+      brickLabel: "Brick",
+      metalLabel: "Metal",
+      continueButton: "Continue",
+    },
     quiz: {
       title: "Check your understanding",
       questions: [
@@ -124,7 +135,7 @@ export const experimentConfig = {
         },
         {
           id: "noticed_materials_and_weights",
-          prompt: "Did you notice that the objects differed in their materials and weights?",
+          prompt: "Did you notice that the objects differed in their materials?",
         },
       ],
       yesLabel: "Yes",
