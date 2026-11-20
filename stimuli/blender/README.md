@@ -1,5 +1,19 @@
 # Scripted stimulus rendering
 
+The experiment's material introduction uses three transparent 384×384 crops at
+native pixel scale from unchanged Full HD production scenes. Regenerate them on
+macOS (Blender 5.2.2 and the built-in `sips` tool) with:
+
+```sh
+/Applications/Blender.app/Contents/MacOS/Blender --background --factory-startup \
+  --python-exit-code 1 --python stimuli/blender/render_materials.py
+```
+
+This writes `experiment/assets/materials/{wood,brick,metal}.png`. It reuses the
+production renderer and initial table-block poses; Cryptomatte extracts the
+blocks while retaining the full scene for lighting and reflections. Cropping
+does not resize the blocks. The experiment displays them at the video scale.
+
 ## Inspect and edit a stimulus in the Blender app
 
 Blender is installed as `/Applications/Blender.app`. The production renderer
