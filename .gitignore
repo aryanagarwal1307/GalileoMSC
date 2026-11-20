@@ -30,3 +30,6 @@ Manifest.toml
 # Local web prototype dependencies and build output
 node_modules/
 dist/
+
+test/
+REPO_AUDIT.md
